@@ -1,10 +1,12 @@
-import type { ConnectionRow, InventorySnapshot } from '@rayfin-app/shared';
+import type { ConnectionRow, DirectoryLookupResult, InventorySnapshot } from '@rayfin-app/shared';
 
 export type OwnerFilter = 'all' | 'pending' | 'loaded' | 'error' | 'none';
 export type SortColumn = 'displayName' | 'owners' | 'connectorType' | 'endpoint';
 export interface InventoryFilters {
   search: string;
   connectorType: string;
+  /** A credential type, CREDENTIAL_TYPE_NOT_PROVIDED, or empty for all. */
+  credentialType: string;
   ownerStatus: OwnerFilter;
 }
 export interface InventorySort {
@@ -13,8 +15,15 @@ export interface InventorySort {
 }
 
 export const PAGE_SIZE = 25;
+/** Filter value for connections whose authentication type Fabric did not return; never a Fabric credential type. */
+export const CREDENTIAL_TYPE_NOT_PROVIDED = '(not provided)';
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+/** Readable authentication type, such as "Service Principal" for ServicePrincipal. */
+export function credentialTypeLabel(value?: string): string {
+  return value ? value.replace(/([a-z\d])([A-Z])/g, '$1 $2').replace(/([A-Z]{2,})([A-Z][a-z])/g, '$1 $2') : 'Not provided';
+}
 
 // Rows are immutable snapshots, so their derived text can be cached per row object.
 const ownerTextCache = new WeakMap<ConnectionRow, string>();
@@ -25,7 +34,7 @@ function ownerSearchText(row: ConnectionRow): string {
   if (text === undefined) {
     text = row.owners
       .map((owner) =>
-        [owner.id, owner.type, owner.displayName, owner.userPrincipalName, owner.role]
+        [owner.id, owner.type, owner.displayName, owner.userPrincipalName, owner.mail, owner.role]
           .filter(Boolean)
           .join(' ')
       )
@@ -43,6 +52,7 @@ function searchText(row: ConnectionRow): string {
       row.id,
       row.connectorType,
       row.connectivityType,
+      row.credentialType,
       row.endpoint,
       ownerSearchText(row),
     ].join(' ').toLocaleLowerCase();
@@ -60,6 +70,9 @@ export function selectConnections(
   return rows
     .filter((row) => {
       if (filters.connectorType && row.connectorType !== filters.connectorType) return false;
+      if (filters.credentialType && (row.credentialType || CREDENTIAL_TYPE_NOT_PROVIDED) !== filters.credentialType) {
+        return false;
+      }
       if (filters.ownerStatus === 'none') {
         if (row.ownerStatus !== 'loaded' || row.owners.length !== 0) return false;
       } else if (filters.ownerStatus !== 'all' && row.ownerStatus !== filters.ownerStatus) {
@@ -73,6 +86,34 @@ export function selectConnections(
       const comparison = collator.compare(left, right) || collator.compare(a.id, b.id);
       return sort.direction === 'asc' ? comparison : -comparison;
     });
+}
+
+/**
+ * Adds Microsoft Entra ID names to owners that Fabric returned without one. Names from Fabric are kept,
+ * and rows without new information keep their identity, so cached search text stays valid.
+ */
+export function withDirectoryNames(
+  rows: ConnectionRow[],
+  results: ReadonlyMap<string, DirectoryLookupResult>
+): ConnectionRow[] {
+  if (results.size === 0) return rows;
+  return rows.map((row) => {
+    let changed = false;
+    const owners = row.owners.map((owner) => {
+      if (owner.displayName) return owner;
+      const result = results.get(owner.id.toLowerCase());
+      if (!result) return owner;
+      changed = true;
+      return result.status === 'resolved' ? {
+        ...owner,
+        displayName: result.displayName,
+        userPrincipalName: owner.userPrincipalName ?? result.userPrincipalName,
+        mail: result.mail,
+        directoryStatus: result.status,
+      } : { ...owner, directoryStatus: result.status };
+    });
+    return changed ? { ...row, owners } : row;
+  });
 }
 
 export function summarizeInventory(snapshot: InventorySnapshot) {

@@ -9,6 +9,14 @@ export type UniversalAppSchema = Record<string, never>;
 export {
   DEFAULT_THROTTLE_WAIT_MS, FabricInventory, InventoryError, delay, requireTenantAdminToken, safeResult,
 } from './fabric-api.js';
+export {
+  MAX_SCAN_WORKSPACES, WorkspaceScanner, connectionUsageFromScan,
+  type DependentItem, type WorkspaceScan, type WorkspaceUsage,
+} from './scanner-api.js';
+export {
+  DirectoryLookup, MAX_DIRECTORY_BATCH, isDirectoryPrincipal, requireDirectoryToken,
+  type DirectoryLookupResult, type PrincipalLookup, type PrincipalReference,
+} from './directory-api.js';
 
 export interface ApiFailure {
   code: string;
@@ -42,6 +50,10 @@ export interface ConnectionOwner {
   displayName?: string;
   userPrincipalName?: string;
   role: 'Owner' | 'PendingOwner';
+  /** Email address found by a Microsoft Entra ID lookup. */
+  mail?: string;
+  /** Outcome of looking up, in Microsoft Entra ID, a name that Fabric did not return. */
+  directoryStatus?: 'resolved' | 'notFound' | 'denied' | 'failed';
 }
 
 export interface ConnectionRow extends ConnectionRecord {

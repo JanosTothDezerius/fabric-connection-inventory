@@ -1,22 +1,29 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { InventorySnapshot, LoadInventoryOptions } from '@rayfin-app/shared';
+import { DirectoryLookup, type InventorySnapshot, type LoadInventoryOptions } from '@rayfin-app/shared';
 
 import App from '@/App';
 import { ThemeContext } from '@/hooks/theme.context';
 import { useAppTheme } from '@/hooks/use-theme';
-import { getAdminSession } from '@/services/admin-auth';
+import { getAdminSession, getDirectoryAccessToken } from '@/services/admin-auth';
+import { emptyUsage, loadConnectionUsage, type LoadUsageOptions } from '@/services/connection-usage';
 import { loadInventory } from '@/services/inventory';
 import { syntheticConnection, syntheticSnapshot } from '@/test/inventory-fixtures';
 import { configureSyntheticAdminEnvironment, syntheticTenantId } from '@/test/admin-config-fixtures';
 
 vi.mock('@/services/inventory', () => ({ loadInventory: vi.fn() }));
+vi.mock('@/services/connection-usage', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/services/connection-usage')>(),
+  loadConnectionUsage: vi.fn(),
+}));
 vi.mock('@/services/admin-auth', () => ({
   getAdminSession: vi.fn(),
   signInAdmin: vi.fn(),
   disconnectAdmin: vi.fn(),
+  getDirectoryAccessToken: vi.fn(),
 }));
 const mockLoad = vi.mocked(loadInventory);
+const mockUsage = vi.mocked(loadConnectionUsage);
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -24,6 +31,7 @@ beforeEach(() => {
   vi.mocked(getAdminSession).mockReturnValue({
     username: 'synthetic-admin@example.test', tenantId: syntheticTenantId,
   });
+  mockUsage.mockReturnValue(new Promise(() => {}));
 });
 afterEach(() => {
   cleanup();
@@ -207,6 +215,99 @@ describe('Connection inventory', () => {
     render(<App />);
     expect(await screen.findByRole('alert')).toHaveTextContent('Refresh to try again');
     expect(screen.queryByText('Loading connections…')).not.toBeInTheDocument();
+  });
+
+  it('filters by authentication type and shows each connection’s type', async () => {
+    mockLoad.mockResolvedValue(syntheticSnapshot([
+      syntheticConnection({ id: 'principal', displayName: 'Synthetic principal', credentialType: 'ServicePrincipal' }),
+      syntheticConnection({ id: 'oauth', displayName: 'Synthetic oauth', credentialType: 'OAuth2' }),
+    ]));
+    render(<App />);
+    await screen.findByText('Synthetic principal');
+    const select = screen.getByRole('combobox', { name: 'Authentication type' });
+    expect(within(select).getAllByRole('option').map((option) => option.textContent))
+      .toEqual(['All authentication types', 'OAuth2', 'Service Principal']);
+
+    fireEvent.change(select, { target: { value: 'ServicePrincipal' } });
+    expect(screen.getByText('Synthetic principal')).toBeVisible();
+    expect(screen.queryByText('Synthetic oauth')).not.toBeInTheDocument();
+    expect(within(screen.getByRole('table')).getByText('Auth: Service Principal')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(screen.getByText('Synthetic oauth')).toBeVisible();
+  });
+
+  it('shows directory names next to owner IDs and explains how to enable names that cannot be read', async () => {
+    const user = '11111111-1111-4111-8111-111111111111';
+    const group = '22222222-2222-4222-8222-222222222222';
+    mockLoad.mockResolvedValue(syntheticSnapshot([syntheticConnection({
+      owners: [{ id: user, type: 'User', role: 'Owner' }, { id: group, type: 'Group', role: 'Owner' }],
+    })]));
+    vi.mocked(getDirectoryAccessToken).mockResolvedValue('synthetic-graph-token');
+    const lookup = vi.spyOn(DirectoryLookup.prototype, 'lookupPrincipals').mockResolvedValueOnce([
+      { id: user, result: { status: 'resolved', displayName: 'Synthetic Owner', userPrincipalName: 'owner@example.test' } },
+      { id: group, result: { status: 'denied' } },
+    ]);
+    render(<App />);
+    const table = within(await screen.findByRole('table'));
+
+    expect(await table.findByText('Synthetic Owner')).toBeVisible();
+    expect(table.getByText(user)).toBeVisible();
+    expect(table.getByText('owner@example.test')).toBeVisible();
+    expect(table.getByText(group)).toBeVisible();
+    expect(screen.getByText('Some owner names can’t be read')).toBeVisible();
+    expect(screen.getByText('GroupMember.Read.All')).toBeVisible();
+
+    lookup.mockResolvedValueOnce([{ id: group, result: { status: 'resolved', displayName: 'Synthetic Group' } }]);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry name lookups' }));
+    expect(await table.findByText('Synthetic Group')).toBeVisible();
+    expect(getDirectoryAccessToken).toHaveBeenLastCalledWith(true);
+    expect(lookup).toHaveBeenLastCalledWith([{ id: group, type: 'Group' }]);
+    expect(screen.queryByText('Some owner names can’t be read')).not.toBeInTheDocument();
+    lookup.mockRestore();
+  });
+
+  it('lists the dependent workloads of an expanded connection, or says it is not used', async () => {
+    mockLoad.mockResolvedValue(syntheticSnapshot([
+      syntheticConnection({ id: 'used', displayName: 'Synthetic used' }),
+      syntheticConnection({ id: 'unused', displayName: 'Synthetic unused' }),
+    ]));
+    mockUsage.mockResolvedValue({
+      ...emptyUsage(), phase: 'done', workspaceCount: 2, scannedWorkspaces: 2, updatedAt: '2026-01-02T03:04:05Z',
+      itemsByConnection: new Map([['used', [
+        { id: 'model', name: 'Synthetic sales model', type: 'Semantic model', workspaceId: 'workspace', workspaceName: 'Synthetic workspace' },
+        { id: 'flow', name: 'Synthetic flow', type: 'Dataflow', workspaceId: 'workspace', workspaceName: 'Synthetic workspace', misconfigured: true },
+      ]]]),
+    });
+    render(<App />);
+    expect(await screen.findByText('Dependent workloads scanned')).toBeVisible();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show details for Synthetic used' }));
+    const workloads = within(screen.getByRole('list', { name: 'Dependent workloads' }));
+    expect(workloads.getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      'DataflowSynthetic flowin Synthetic workspaceMisconfigured binding',
+      'Semantic modelSynthetic sales modelin Synthetic workspace',
+    ]);
+    fireEvent.click(screen.getByRole('button', { name: 'Show details for Synthetic unused' }));
+    expect(screen.getByText('Not used by any workload. No item in the 2 scanned workspaces is bound to this connection.')).toBeVisible();
+  });
+
+  it('cancels a running workspace scan without marking a finished inventory as cancelled', async () => {
+    let usageOptions!: LoadUsageOptions;
+    mockLoad.mockResolvedValue(syntheticSnapshot());
+    mockUsage.mockImplementation((options) => {
+      usageOptions = options;
+      return new Promise(() => {});
+    });
+    render(<App />);
+    expect(await screen.findByText('Inventory refreshed')).toBeVisible();
+    expect(screen.getByText('Scanning workspaces for dependent workloads')).toBeVisible();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Cancel$/ }));
+    expect(usageOptions.signal.aborted).toBe(true);
+    expect(screen.getByText('Workspace scan cancelled')).toBeVisible();
+    expect(screen.getByText('Inventory refreshed')).toBeVisible();
+    expect(screen.queryByText('Refresh cancelled')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Cancel$/ })).not.toBeInTheDocument();
   });
 
   it('uses the existing theme toggle and keeps data-theme and dark class coherent', async () => {

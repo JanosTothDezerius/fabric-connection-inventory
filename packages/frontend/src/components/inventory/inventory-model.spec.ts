@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { syntheticConnection, syntheticSnapshot } from '@/test/inventory-fixtures';
-import { formatTimestamp, selectConnections, summarizeInventory } from './inventory-model';
+import {
+  CREDENTIAL_TYPE_NOT_PROVIDED, credentialTypeLabel, formatTimestamp, selectConnections, summarizeInventory, withDirectoryNames,
+} from './inventory-model';
 
-const filters = { search: '', connectorType: '', ownerStatus: 'all' as const };
+const filters = { search: '', connectorType: '', credentialType: '', ownerStatus: 'all' as const };
 const sort = { column: 'displayName' as const, direction: 'asc' as const };
 
 describe('inventory filtering and summaries', () => {
@@ -67,5 +69,49 @@ describe('inventory filtering and summaries', () => {
     expect(formatTimestamp()).toBe('Not provided');
     expect(formatTimestamp('invalid')).toBe('Not provided');
     expect(formatTimestamp('2026-01-02T03:04:05Z')).not.toBe('Not provided');
+  });
+
+  it('filters and searches by authentication type, keeping missing types selectable', () => {
+    const rows = [
+      syntheticConnection({ id: 'principal', credentialType: 'ServicePrincipal' }),
+      syntheticConnection({ id: 'oauth', credentialType: 'OAuth2' }),
+      syntheticConnection({ id: 'missing' }),
+    ];
+    const select = (update: Partial<typeof filters>) =>
+      selectConnections(rows, { ...filters, ...update }, sort).map((row) => row.id);
+
+    expect(select({ credentialType: 'ServicePrincipal' })).toEqual(['principal']);
+    expect(select({ credentialType: CREDENTIAL_TYPE_NOT_PROVIDED })).toEqual(['missing']);
+    expect(select({ search: 'oauth2' })).toEqual(['oauth']);
+    expect(['ServicePrincipal', 'OAuth2', 'WindowsWithoutImpersonation', undefined].map(credentialTypeLabel))
+      .toEqual(['Service Principal', 'OAuth2', 'Windows Without Impersonation', 'Not provided']);
+  });
+
+  it('adds directory names to unnamed owners only, and keeps unchanged rows for cached search text', () => {
+    const named = syntheticConnection({
+      id: 'named', owners: [{ id: 'AAAA', type: 'User', displayName: 'Fabric name', role: 'Owner' }],
+    });
+    const unnamed = syntheticConnection({
+      id: 'unnamed',
+      owners: [
+        { id: 'BBBB', type: 'User', role: 'Owner' },
+        { id: 'cccc', type: 'Group', role: 'PendingOwner' },
+        { id: 'dddd', type: 'User', role: 'Owner' },
+      ],
+    });
+    const rows = withDirectoryNames([named, unnamed], new Map([
+      ['aaaa', { status: 'resolved' as const, displayName: 'Directory name' }],
+      ['bbbb', { status: 'resolved' as const, displayName: 'Synthetic Owner', userPrincipalName: 'owner@example.test' }],
+      ['cccc', { status: 'resolved' as const, displayName: 'Synthetic Group', mail: 'group@example.test' }],
+      ['dddd', { status: 'notFound' as const }],
+    ]));
+
+    expect(rows[0]).toBe(named);
+    expect(rows[1].owners).toEqual([
+      { id: 'BBBB', type: 'User', role: 'Owner', displayName: 'Synthetic Owner', userPrincipalName: 'owner@example.test', mail: undefined, directoryStatus: 'resolved' },
+      { id: 'cccc', type: 'Group', role: 'PendingOwner', displayName: 'Synthetic Group', userPrincipalName: undefined, mail: 'group@example.test', directoryStatus: 'resolved' },
+      { id: 'dddd', type: 'User', role: 'Owner', directoryStatus: 'notFound' },
+    ]);
+    expect(selectConnections(rows, { ...filters, search: 'synthetic group' }, sort).map((row) => row.id)).toEqual(['unnamed']);
   });
 });

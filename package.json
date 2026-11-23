@@ -18,7 +18,7 @@
     "build:fabric": "npm run -w @rayfin-app/shared build && npm run -w @rayfin-app/data build && npm run -w @rayfin-app/frontend build:fabric",
     "lint": "npm run -w @rayfin-app/frontend lint",
     "preview": "npm run -w @rayfin-app/frontend preview",
-    "test": "npm run -w @rayfin-app/shared build && node --test packages/shared/test/fabric-api.test.mjs && npm run -w @rayfin-app/frontend test",
+    "test": "npm run -w @rayfin-app/shared build && node --test packages/shared/test/fabric-api.test.mjs packages/shared/test/usage-and-directory.test.mjs && npm run -w @rayfin-app/frontend test",
     "test:watch": "npm run -w @rayfin-app/frontend test:watch",
     "typecheck": "tsc -b",
     "rayfin:up": "rayfin up"

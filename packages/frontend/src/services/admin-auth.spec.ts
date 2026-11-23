@@ -150,6 +150,39 @@ describe('configured single-tenant delegated authentication', () => {
     expect(msal.loginPopup).toHaveBeenCalledOnce();
   });
 
+  it('acquires scanner and Graph tokens silently for the connected admin, never with a popup', async () => {
+    const auth = await import('./admin-auth');
+    await expect(auth.getDirectoryAccessToken()).rejects.toMatchObject({ code: 'AdminSignInRequired' });
+    await auth.signInAdmin();
+    expect(await auth.getPowerBiAdminAccessToken()).toBe(token());
+    expect(msal.acquireTokenSilent).toHaveBeenLastCalledWith({ account: identity, scopes: [auth.POWER_BI_ADMIN_SCOPE] });
+
+    const graphToken = token(tenant, 'User.ReadBasic.All GroupMember.Read.All');
+    msal.acquireTokenSilent.mockResolvedValueOnce({ account: identity, accessToken: graphToken });
+    expect(await auth.getDirectoryAccessToken(true)).toBe(graphToken);
+    expect(msal.acquireTokenSilent).toHaveBeenLastCalledWith({
+      account: identity, scopes: [auth.DIRECTORY_SCOPE], forceRefresh: true,
+    });
+    expect(msal.loginPopup).toHaveBeenCalledOnce();
+  });
+
+  it('reports unavailable Graph access without raw details, and pins the Graph token tenant', async () => {
+    const { InteractionRequiredAuthError } = await import('@azure/msal-browser');
+    const auth = await import('./admin-auth');
+    await auth.signInAdmin();
+    msal.acquireTokenSilent.mockRejectedValueOnce(new InteractionRequiredAuthError('invalid_grant', 'synthetic-sensitive-error-payload'));
+    await expect(auth.getDirectoryAccessToken()).rejects.toMatchObject({
+      code: 'DirectoryAccessUnavailable', message: expect.stringContaining('(invalid_grant)'),
+    });
+    msal.acquireTokenSilent.mockRejectedValueOnce(new Error('synthetic-sensitive-error-payload'));
+    await expect(auth.getDirectoryAccessToken()).rejects.not.toThrow('synthetic-sensitive-error-payload');
+    msal.acquireTokenSilent.mockResolvedValueOnce({
+      account: identity, accessToken: token('44444444-4444-4444-8444-444444444444', 'User.ReadBasic.All'),
+    });
+    await expect(auth.getDirectoryAccessToken()).rejects.toMatchObject({ code: 'WrongTenant' });
+    expect(msal.loginPopup).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ['VITE_ADMIN_TENANT_ID', undefined, 'AdminConfigurationRequired'],
     ['VITE_ADMIN_CLIENT_ID', 'invalid-client', 'InvalidAdminConfiguration'],

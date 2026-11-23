@@ -14,17 +14,21 @@ import {
 import { ConnectionTable } from '@/components/inventory/connection-table';
 import { InventoryHeader } from '@/components/inventory/inventory-header';
 import { InventoryStatus } from '@/components/inventory/inventory-status';
+import { OwnerNameStatus, UsageStatus } from '@/components/inventory/lookup-status';
 import {
-  formatTimestamp, PAGE_SIZE, selectConnections, summarizeInventory,
-  type InventoryFilters, type InventorySort, type SortColumn,
+  CREDENTIAL_TYPE_NOT_PROVIDED, credentialTypeLabel, formatTimestamp, PAGE_SIZE, selectConnections, summarizeInventory,
+  withDirectoryNames, type InventoryFilters, type InventorySort, type SortColumn,
 } from '@/components/inventory/inventory-model';
+import { useConnectionUsage } from '@/hooks/use-connection-usage';
 import { useInventory } from '@/hooks/use-inventory';
+import { usePrincipalNames } from '@/hooks/use-principal-names';
 import {
   disconnectAdmin, getAdminSession, signInAdmin, type AdminSession,
 } from '@/services/admin-auth';
 import { getAdminSetup, getInventoryLabels } from '@/services/admin-config';
+import { isDirectoryPrincipal } from '@rayfin-app/shared';
 
-const emptyFilters: InventoryFilters = { search: '', connectorType: '', ownerStatus: 'all' };
+const emptyFilters: InventoryFilters = { search: '', connectorType: '', credentialType: '', ownerStatus: 'all' };
 
 function App() {
   const [session, setSession] = useState<AdminSession | null>(() => getAdminSession());
@@ -171,16 +175,22 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
   onReconnect: () => void;
 }) {
   const { snapshot, loading, cancelled, refresh, resume, cancel } = useInventory();
+  const usage = useConnectionUsage();
+  const names = usePrincipalNames(snapshot.connections);
   const labels = getInventoryLabels();
   const [filters, setFilters] = useState<InventoryFilters>(emptyFilters);
   const [sort, setSort] = useState<InventorySort>({ column: 'displayName', direction: 'asc' });
   const [page, setPage] = useState(1);
   const counts = useMemo(() => summarizeInventory(snapshot), [snapshot]);
+  const connections = useMemo(
+    () => withDirectoryNames(snapshot.connections, names.results),
+    [snapshot.connections, names.results]
+  );
   // Typing stays responsive on large tenants; the filtered list catches up a frame later.
   const search = useDeferredValue(filters.search);
   const rows = useMemo(
-    () => selectConnections(snapshot.connections, { ...filters, search }, sort),
-    [snapshot.connections, filters, search, sort]
+    () => selectConnections(connections, { ...filters, search }, sort),
+    [connections, filters, search, sort]
   );
   const connectorTypes = useMemo(
     () => [...new Set([
@@ -189,11 +199,32 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
     ])].sort((a, b) => a.localeCompare(b)),
     [snapshot.connections, filters.connectorType]
   );
+  const credentialTypes = useMemo(
+    () => [...new Set([
+      ...snapshot.connections.map((row) => row.credentialType || CREDENTIAL_TYPE_NOT_PROVIDED),
+      ...(filters.credentialType ? [filters.credentialType] : []),
+    ])].sort((a, b) => a === CREDENTIAL_TYPE_NOT_PROVIDED ? 1 : b === CREDENTIAL_TYPE_NOT_PROVIDED ? -1 :
+      credentialTypeLabel(a).localeCompare(credentialTypeLabel(b))),
+    [snapshot.connections, filters.credentialType]
+  );
+  // The owner types whose names are missing because of the problem the name notice reports.
+  const nameTypes = useMemo(() => {
+    const types = new Set<string>();
+    for (const row of connections) {
+      for (const owner of row.owners) {
+        const affected = names.unavailable ?
+          !owner.displayName && !owner.directoryStatus && isDirectoryPrincipal(owner) :
+          owner.directoryStatus === 'denied';
+        if (affected) types.add(owner.type);
+      }
+    }
+    return [...types];
+  }, [connections, names.unavailable]);
   const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
   const firstRow = (currentPage - 1) * PAGE_SIZE;
   const visibleRows = rows.slice(firstRow, firstRow + PAGE_SIZE);
-  const hasFilters = Boolean(filters.search || filters.connectorType || filters.ownerStatus !== 'all');
+  const hasFilters = Boolean(filters.search || filters.connectorType || filters.credentialType || filters.ownerStatus !== 'all');
   const complete = snapshot.phase === 'done' && snapshot.inventoryComplete;
 
   function updateFilters(update: Partial<InventoryFilters>) {
@@ -212,6 +243,15 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
   function refreshInventory() {
     setPage(1);
     refresh();
+    usage.refresh();
+    // Names already found are kept; denied, failed or paused lookups are tried again.
+    names.retry();
+  }
+
+  function cancelLoading() {
+    // A finished inventory stays complete when only the workspace scan is still running.
+    if (loading) cancel();
+    usage.cancel();
   }
 
   let emptyTitle = 'No matching connections';
@@ -249,8 +289,8 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
           </div>
           <div className="space-y-200">
             <div className="flex flex-wrap items-center gap-200">
-              {loading && (
-                <button className="inventory-button" onClick={cancel}>
+              {(loading || usage.loading) && (
+                <button className="inventory-button" onClick={cancelLoading}>
                   <X className="icon-size-200" aria-hidden="true" /> Cancel
                 </button>
               )}
@@ -310,6 +350,8 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
           onRetry={refreshInventory}
           onResume={resume}
         />
+        <UsageStatus usage={usage} onRetry={usage.refresh} />
+        <OwnerNameStatus unavailable={names.unavailable} types={nameTypes} onRetry={names.retry} />
 
         <section className="inventory-panel" aria-labelledby="connections-title">
           <div className="space-y-500 border-b p-500 sm:p-600">
@@ -340,6 +382,17 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
                 </select>
               </label>
               <label className="inventory-field">
+                <span>Authentication type</span>
+                <select value={filters.credentialType} onChange={(event) => updateFilters({ credentialType: event.target.value })}>
+                  <option value="">All authentication types</option>
+                  {credentialTypes.map((type) => (
+                    <option key={type} value={type}>
+                      {type === CREDENTIAL_TYPE_NOT_PROVIDED ? 'Not provided' : credentialTypeLabel(type)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="inventory-field">
                 <span>Owner resolution</span>
                 <select
                   value={filters.ownerStatus}
@@ -366,6 +419,7 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
             sort={sort}
             onSort={updateSort}
             loading={loading}
+            usage={usage}
             emptyTitle={emptyTitle}
             emptyDescription={emptyDescription}
           />
@@ -391,8 +445,9 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
         <footer className="flex items-start gap-200 pb-400 text-200 text-muted-foreground">
           <Info className="icon-size-200 shrink-0" aria-hidden="true" />
           <p>
-            Fabric may return only an owner’s principal ID and type, not a display name.
-            IDs are shown exactly as returned; names are not inferred. Pending owner assignments are labeled separately.
+            Fabric may return only an owner’s principal ID and type. Missing user, group and service principal names
+            are looked up in Microsoft Entra ID and shown next to the IDs; names are never guessed. Pending owner assignments are labeled separately.
+            Dependent workloads come from the Fabric admin workspace scanner and are read-only.
             Endpoints are displayed as text, not opened or tested. Summary counts include all loaded connections, regardless of filters.
             {' '}Disconnect clears only this app’s in-memory admin session, not your Microsoft sign-in in other apps.
           </p>

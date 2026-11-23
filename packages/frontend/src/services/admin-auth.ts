@@ -2,7 +2,7 @@ import {
   AuthError, BrowserCacheLocation, InteractionRequiredAuthError, PublicClientApplication,
   type AccountInfo, type AuthenticationResult,
 } from '@azure/msal-browser';
-import { InventoryError, requireTenantAdminToken } from '@rayfin-app/shared';
+import { InventoryError, requireDirectoryToken, requireTenantAdminToken } from '@rayfin-app/shared';
 import { AdminConfigError, readAdminConfig, type AdminConfig } from './admin-config';
 
 export interface AdminSession {
@@ -18,6 +18,10 @@ export class AdminAuthError extends Error {
 }
 
 export const ADMIN_SCOPE = 'https://api.fabric.microsoft.com/Tenant.Read.All';
+/** The same consented Tenant.Read.All permission, with the audience of the Power BI admin scanner API. */
+export const POWER_BI_ADMIN_SCOPE = 'https://analysis.windows.net/powerbi/api/Tenant.Read.All';
+/** Whichever delegated Microsoft Graph permissions an administrator has granted this app. */
+export const DIRECTORY_SCOPE = 'https://graph.microsoft.com/.default';
 let client: Promise<PublicClientApplication> | undefined;
 let account: AccountInfo | null = null;
 let generation = 0;
@@ -112,6 +116,53 @@ export async function getAdminAccessToken(): Promise<string> {
     return result.accessToken;
   } catch (error) {
     throw authFailure(error);
+  }
+}
+
+async function acquireSilently(scope: string, forceRefresh: boolean): Promise<{ result: AuthenticationResult; config: AdminConfig }> {
+  const config = readAdminConfig();
+  if (!account) throw new AdminAuthError('AdminSignInRequired', 'Connect an admin account in the configured tenant before loading the inventory.');
+  const currentGeneration = generation;
+  const instance = await getClient(config);
+  const result = await instance.acquireTokenSilent({ account, scopes: [scope], ...(forceRefresh ? { forceRefresh } : {}) });
+  if (generation !== currentGeneration) throw new AdminAuthError('AdminSignInRequired', 'The admin account was disconnected.');
+  return { result, config };
+}
+
+/** A token for the Power BI admin scanner API, which uses the same consented Tenant.Read.All permission. */
+export async function getPowerBiAdminAccessToken(): Promise<string> {
+  try {
+    const { result, config } = await acquireSilently(POWER_BI_ADMIN_SCOPE, false);
+    validateResult(result, config);
+    return result.accessToken;
+  } catch (error) {
+    throw authFailure(error);
+  }
+}
+
+function directoryFailure(error: unknown): AdminAuthError {
+  if (error instanceof AdminAuthError || error instanceof AdminConfigError || error instanceof InventoryError) {
+    return authFailure(error);
+  }
+  const code = error instanceof AuthError && /^[a-z0-9_]+$/i.test(error.errorCode) ? error.errorCode : 'unknown_error';
+  return new AdminAuthError('DirectoryAccessUnavailable',
+    `This app has no usable Microsoft Graph access for owner names yet (${code}).`);
+}
+
+/**
+ * A Microsoft Graph token for owner-name lookups. It never opens a sign-in popup: without Graph
+ * consent, names stay unavailable and the inventory is unaffected. `forceRefresh` bypasses a cached
+ * token so newly granted permissions take effect.
+ */
+export async function getDirectoryAccessToken(forceRefresh = false): Promise<string> {
+  try {
+    const { result, config } = await acquireSilently(DIRECTORY_SCOPE, forceRefresh);
+    if (!result.account || result.account.tenantId.toLowerCase() !== config.tenantId) {
+      throw new AdminAuthError('WrongTenant', 'Connect an administrator account in the configured tenant.');
+    }
+    return requireDirectoryToken(result.accessToken, config.tenantId);
+  } catch (error) {
+    throw directoryFailure(error);
   }
 }
 

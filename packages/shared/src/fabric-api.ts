@@ -3,7 +3,7 @@ import type {
 } from './index.js';
 
 const API_ROOT = 'https://api.fabric.microsoft.com/v1/admin/connections';
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
@@ -43,7 +43,7 @@ export function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function retryAfterMs(value: string | null, now: number): number | undefined {
+export function retryAfterMs(value: string | null | undefined, now: number): number | undefined {
   const trimmed = value?.trim();
   if (!trimmed) return undefined;
   if (/^\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed) * 1_000;
@@ -114,19 +114,19 @@ export class InventoryError extends Error {
   }
 }
 
-function invalidResponse(): never {
+export function invalidResponse(): never {
   throw new InventoryError({
     code: 'InvalidApiResponse',
     message: 'Fabric returned an unexpected response. No incomplete page has been treated as complete.',
   });
 }
 
-function object(value: unknown): Record<string, unknown> {
+export function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalidResponse();
   return value as Record<string, unknown>;
 }
 
-function text(value: unknown, required = false): string | undefined {
+export function text(value: unknown, required = false): string | undefined {
   if (value === undefined || value === null) {
     if (required) invalidResponse();
     return undefined;
@@ -135,11 +135,11 @@ function text(value: unknown, required = false): string | undefined {
   return value;
 }
 
-function child(value: unknown): Record<string, unknown> {
+export function child(value: unknown): Record<string, unknown> {
   return value === undefined || value === null ? {} : object(value);
 }
 
-function identifier(value: unknown): string {
+export function identifier(value: unknown): string {
   if (typeof value !== 'string' || !UUID.test(value)) invalidResponse();
   return value;
 }
@@ -256,15 +256,23 @@ export function requireTenantAdminToken(getToken: () => string, expectedTenantId
   return token;
 }
 
-export class FabricInventory {
+/**
+ * Request pacing, throttling windows, deadlines and bounded reads shared by the read-only API clients.
+ * Each client instance paces only its own requests, so different services do not slow each other down.
+ */
+export abstract class PacedApiClient {
   private readonly sleep: (ms: number) => Promise<void>;
   private nextRequestAt = 0;
   private throttledUntil = 0;
+  /** Service name used in messages, such as "Fabric". */
+  protected abstract readonly serviceName: string;
+  /** Prefix of HTTP failure codes, such as "FabricHttp". */
+  protected abstract readonly errorPrefix: string;
 
   constructor(
     private token: string,
     private readonly request: typeof fetch = fetch,
-    private readonly now: () => number = Date.now,
+    protected readonly now: () => number = Date.now,
     sleep?: (ms: number) => Promise<void>,
     private readonly abortSignal?: AbortSignal,
     private requestIntervalMs = REQUEST_INTERVAL_MS,
@@ -278,18 +286,21 @@ export class FabricInventory {
     return this;
   }
 
+  /** The message reported for an unsuccessful HTTP status. */
+  protected abstract failureMessage(status: number): string;
+
   private assertNotThrottled(): void {
     if (this.throttledUntil > this.now()) {
       throw new InventoryError({
-        code: 'FabricHttp429',
-        message: 'Fabric is throttling requests.',
+        code: `${this.errorPrefix}429`,
+        message: `${this.serviceName} is throttling requests.`,
         status: 429,
         retryAt: this.throttledUntil,
       });
     }
   }
 
-  /** Spaces request starts, including concurrent ones, and never calls Fabric during a throttling window. */
+  /** Spaces request starts, including concurrent ones, and never calls the service during a throttling window. */
   private async waitForTurn(): Promise<void> {
     this.abortSignal?.throwIfAborted();
     this.assertNotThrottled();
@@ -314,30 +325,31 @@ export class FabricInventory {
     }
     this.throttledUntil = Math.max(this.throttledUntil, retryAt);
     return new InventoryError({
-      code: 'FabricHttp429',
+      code: `${this.errorPrefix}429`,
       message: body.errorCode === 'CapacityLimitExceeded' ?
-        'The Fabric capacity is overloaded, so Fabric is throttling requests.' :
-        'Fabric is throttling requests.',
+        `The Fabric capacity is overloaded, so ${this.serviceName} is throttling requests.` :
+        `${this.serviceName} is throttling requests.`,
       status: 429,
       requestId,
       retryAt: this.throttledUntil,
     });
   }
 
-  private async get(path: string, continuationToken: string): Promise<unknown> {
-    if (typeof continuationToken !== 'string' || continuationToken.length > 32_768) {
-      throw new InventoryError({ code: 'InvalidInput', message: 'The continuation token is invalid.' });
-    }
-    const url = new URL(API_ROOT + path);
-    if (continuationToken) url.searchParams.set('continuationToken', continuationToken);
+  /** Sends one request and returns its parsed JSON body. Failures are thrown as InventoryError. */
+  protected async send(url: URL, method: 'GET' | 'POST' = 'GET', body?: unknown, maxBytes = MAX_RESPONSE_BYTES): Promise<unknown> {
     for (let attempt = 0; ; attempt++) {
       await this.waitForTurn();
       let response: Response;
       try {
         const request = this.request;
         response = await request(url.href, {
-          method: 'GET',
-          headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/json' },
+          method,
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            Accept: 'application/json',
+            ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
           redirect: 'error',
           credentials: 'omit',
           signal: this.abortSignal ?
@@ -349,7 +361,7 @@ export class FabricInventory {
         this.abortSignal?.throwIfAborted();
         throw new InventoryError({
           code: error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError') ? 'RequestTimeout' : 'NetworkError',
-          message: 'The Fabric API could not be reached within the request deadline. Retry the inventory.',
+          message: `The ${this.serviceName} API could not be reached within the request deadline. Retry the inventory.`,
         });
       }
       const requestId = response.headers.get('request-id') ?? response.headers.get('requestid') ??
@@ -361,8 +373,8 @@ export class FabricInventory {
         await response.body?.cancel();
         if (wait > MAX_IN_PLACE_RETRY_MS) {
           throw new InventoryError({
-            code: 'FabricHttp503',
-            message: 'Fabric is temporarily unavailable.',
+            code: `${this.errorPrefix}503`,
+            message: `${this.serviceName} is temporarily unavailable.`,
             status: 503,
             requestId,
             retryAt: this.now() + wait,
@@ -374,18 +386,17 @@ export class FabricInventory {
       }
       if (!response.ok) {
         await response.body?.cancel();
-        const message = response.status === 403 ?
-          'Access denied. Your signed-in account must be a Fabric administrator and have delegated Tenant.Read.All consent for this app.' :
-          response.status === 401 ? 'Fabric rejected the resource token. Check its audience, expiry, consent, and the admin API identity requirements.' :
-          response.status === 404 ? 'This connection or admin API was not found. The connection may have been deleted, or the preview API may be unavailable.' :
-          response.status === 503 ? 'Fabric remained unavailable after bounded retries.' :
-          `Fabric returned HTTP ${response.status}. Retry or use the request ID to investigate.`;
-        throw new InventoryError({ code: `FabricHttp${response.status}`, message, status: response.status, requestId });
+        throw new InventoryError({
+          code: `${this.errorPrefix}${response.status}`,
+          message: this.failureMessage(response.status),
+          status: response.status,
+          requestId,
+        });
       }
       if (!response.body) invalidResponse();
-      const responseText = await readText(response, MAX_RESPONSE_BYTES);
+      const responseText = await readText(response, maxBytes);
       if (responseText === null) {
-        throw new InventoryError({ code: 'ResponseTooLarge', message: 'The Fabric API response exceeded the safe read limit. No partial page was accepted.' });
+        throw new InventoryError({ code: 'ResponseTooLarge', message: `The ${this.serviceName} API response exceeded the safe read limit. No partial page was accepted.` });
       }
       try {
         return JSON.parse(responseText) as unknown;
@@ -393,6 +404,29 @@ export class FabricInventory {
         invalidResponse();
       }
     }
+  }
+}
+
+export class FabricInventory extends PacedApiClient {
+  protected override readonly serviceName = 'Fabric';
+  protected override readonly errorPrefix = 'FabricHttp';
+
+  protected override failureMessage(status: number): string {
+    return status === 403 ?
+      'Access denied. Your signed-in account must be a Fabric administrator and have delegated Tenant.Read.All consent for this app.' :
+      status === 401 ? 'Fabric rejected the resource token. Check its audience, expiry, consent, and the admin API identity requirements.' :
+      status === 404 ? 'This connection or admin API was not found. The connection may have been deleted, or the preview API may be unavailable.' :
+      status === 503 ? 'Fabric remained unavailable after bounded retries.' :
+      `Fabric returned HTTP ${status}. Retry or use the request ID to investigate.`;
+  }
+
+  private async get(path: string, continuationToken: string): Promise<unknown> {
+    if (typeof continuationToken !== 'string' || continuationToken.length > 32_768) {
+      throw new InventoryError({ code: 'InvalidInput', message: 'The continuation token is invalid.' });
+    }
+    const url = new URL(API_ROOT + path);
+    if (continuationToken) url.searchParams.set('continuationToken', continuationToken);
+    return this.send(url);
   }
 
   async listConnections(continuationToken: string): Promise<ConnectionPage> {
