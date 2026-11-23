@@ -18,7 +18,8 @@ connection inventory, or previous deployment records are included.
 - All `Owner` and `PendingOwner` assignments, with pending ownership labeled.
 - Owner names: when Fabric returns only a principal ID, the user, group, or
   service principal name is looked up in Microsoft Entra ID and shown next to
-  the ID (requires the optional Microsoft Graph permissions below).
+  the ID (requires the Microsoft Graph permissions listed under
+  [API permissions](#api-permissions)).
 - Dependent workloads: each connection's details list the semantic models,
   dataflows, data pipelines, Copy jobs, lakehouses, and other items bound to
   it, or state that no scanned item uses it.
@@ -55,10 +56,11 @@ contacts the displayed endpoints.
 - A Fabric workspace on an available capacity in a supported region, with the
   Fabric Apps workload enabled.
 - Permission to create/deploy Fabric Apps in that workspace.
-- A Microsoft Entra administrator who can register a single-tenant SPA and
-  approve delegated `Tenant.Read.All` (and, optionally, the Microsoft Graph read
-  permissions that enable owner names).
-- A Fabric administrator account to use the tenant inventory APIs.
+- A Microsoft Entra account that can create app registrations, and an
+  administrator who can grant tenant-wide admin consent (Cloud Application
+  Administrator, Application Administrator, or Privileged Role Administrator)
+  for the [API permissions](#api-permissions) below.
+- A Fabric administrator account to use the tenant admin APIs.
 
 ## Deploy in your tenant
 
@@ -74,44 +76,73 @@ npx rayfin up --workspace-id <your-workspace-id> --json
 
 Confirm the signed-in account and target workspace before deploying. Do not copy
 another deployment's `.env`, `.env.local`, or `rayfin/.deployments.json`.
-The CLI returns your app's hosting URL and Fabric item link.
+The CLI returns your app's hosting URL and Fabric item link. It also adds that
+origin to `allowedRedirectUris` in `rayfin/rayfin.yml` for Rayfin's Fabric
+sign-in handoff; you don't need to edit that file, and the entry is specific to
+your deployment. It is separate from the Microsoft Entra redirect URI that you
+register in step 2.
 
 The initial deployment can render without administrator sign-in configuration,
 but it cannot enumerate a tenant until the configuration below is supplied.
 Do not treat this bootstrap deployment as a fully configured app.
 
-### 2. Register dedicated administrator sign-in
+### 2. Register the administrator sign-in app and its permissions
 
-In the Microsoft Entra admin center for your tenant:
+The app signs administrators in with its own single-tenant Microsoft Entra app
+registration. In the [Microsoft Entra admin center](https://entra.microsoft.com),
+go to **Entra ID** > **App registrations**:
 
-1. Register an application with **Accounts in this organizational directory only**.
-2. Select the **Single-page application (SPA)** platform and register this exact
-   redirect URI, replacing the origin with the hosting URL from step 1:
-   `https://<your-app-host>/admin-auth.html`.
-3. Add **Power BI Service -> Delegated permissions -> Tenant.Read.All** and grant
-   the required administrator consent. Remove unused default permissions such as
-   Microsoft Graph `User.Read` if they were added by the registration wizard.
-   The same permission covers the admin workspace scanner used for dependent
-   workloads.
-4. Optional, for owner names: add **Microsoft Graph -> Delegated permissions**
-   `User.ReadBasic.All` (user names), `GroupMember.Read.All` (group names), and,
-   if service principals own connections, `Application.Read.All`, then grant
-   administrator consent. `Directory.Read.All` also works but is broader. Without
-   these permissions the inventory still works; owners show their IDs and the app
-   explains which permission is missing.
-5. Record the application/client ID and directory/tenant ID.
+1. Select **New registration**. Enter a name, choose **Accounts in this
+   organizational directory only**, and under **Redirect URI** select
+   **Single-page application (SPA)** with this exact URI, using the hosting
+   origin from step 1: `https://<your-app-host>/admin-auth.html`.
+2. Open **API permissions** > **Add a permission** and add each **delegated**
+   permission in the [table below](#api-permissions). Remove permissions the app
+   doesn't use, such as Microsoft Graph `User.Read`, which new registrations get
+   by default.
+3. Have an administrator select **Grant admin consent for [your tenant]** and
+   confirm. Every permission's **Status** must then show
+   **Granted for [your tenant]**. Repeat this whenever you add a permission.
+4. On **Overview**, record the **Application (client) ID** and **Directory
+   (tenant) ID** for step 3.
 
-Do not create a client secret or enable implicit token issuance. MSAL uses the
-authorization-code flow with PKCE. The app requests
-`https://api.fabric.microsoft.com/Tenant.Read.All` and standard OIDC sign-in and
-renewal scopes at sign-in. It then silently requests the same `Tenant.Read.All`
-permission for the `https://analysis.windows.net/powerbi/api` audience (admin
-workspace scanner) and `https://graph.microsoft.com/.default` (owner names, only
-the Graph permissions an administrator granted). These silent requests never
-open a sign-in window.
+Don't add a client secret or certificate, and don't enable implicit grant
+(access or ID tokens) under **Authentication**. MSAL uses the authorization-code
+flow with PKCE.
 
-Consent does not make a user a tenant administrator. Fabric checks the signed-in
-user's role and permissions on each API request.
+#### API permissions
+
+| API | Delegated permission | Required | Used for |
+|---|---|---|---|
+| Power BI Service | `Tenant.Read.All` | **Yes** | Listing connections and their owners (Fabric admin APIs) and finding dependent workloads (admin workspace scanner) |
+| Microsoft Graph | `User.ReadBasic.All` | For owner names | Names of users that own connections |
+| Microsoft Graph | `GroupMember.Read.All` | For owner names | Names of groups that own connections |
+| Microsoft Graph | `Application.Read.All` | For owner names, if service principals own connections | Names of service principals that own connections |
+
+- **Every permission needs admin consent**, including `User.ReadBasic.All`,
+  which the portal lists as not requiring it. The app never shows a consent
+  prompt: it requests the scanner and Microsoft Graph tokens silently, so a
+  permission without admin consent counts as missing.
+- Add only delegated permissions; the app never uses application permissions.
+  Don't substitute broader permissions such as `Directory.Read.All`: the app's
+  Microsoft Graph token carries every Graph permission granted to this
+  registration.
+- Without a Graph permission, owners of that type show only their ID and a
+  notice names the missing permission. The inventory and dependent workloads
+  still work.
+- One `Tenant.Read.All` grant covers both tokens the app requests from the Power
+  BI Service API: `https://api.fabric.microsoft.com/Tenant.Read.All` at sign-in,
+  for connections and owners, and
+  `https://analysis.windows.net/powerbi/api/Tenant.Read.All` afterwards, for the
+  workspace scanner. Sign-in also requests the standard OpenID Connect sign-in
+  and renewal scopes, which need no entry in the table. For owner names the app
+  requests `https://graph.microsoft.com/.default`. Requests after sign-in are
+  silent and never open a sign-in window.
+
+Consent doesn't make anyone an administrator. Fabric checks on each request that
+the signed-in account is a Fabric administrator, and Microsoft Graph returns only
+directory objects that the account may read, which member accounts can by
+default.
 
 ### 3. Configure and redeploy
 
@@ -143,11 +174,51 @@ npx rayfin up --dry-run --workspace-id <your-workspace-id> --json
 npx rayfin up --workspace-id <your-workspace-id> --json
 ```
 
+### 4. Sign in and verify
+
 Open the Fabric item, choose **Connect admin account**, then select **Continue
-to Microsoft sign-in** in the temporary authentication window. Select an
+to Microsoft sign-in** in the temporary authentication window. Select a Fabric
 administrator in your configured tenant. The authentication windows close after
 sign-in and the inventory appears inside the Fabric App. The standalone hosting
-URL also works. Confirm that the live inventory and owner lookups complete.
+URL also works.
+
+A fully configured app shows:
+
+1. **Inventory refreshed** once the connection list and all owner lookups have
+   finished. Large tenants can take a while; when Fabric throttles requests, the
+   app pauses and continues on its own.
+2. **Dependent workloads scanned**. Expand a connection to see the items that
+   use it under **Dependent workloads**.
+3. Owner names above their IDs, with no **Owner names unavailable** or **Some
+   owner names can't be read** notice.
+
+#### Troubleshooting permissions
+
+| What you see | Cause | Fix |
+|---|---|---|
+| Microsoft sign-in asks for consent or admin approval, or **Admin sign-in did not grant Tenant.Read.All** | Power BI `Tenant.Read.All` is missing or has no admin consent | Add it, grant admin consent (step 2), then choose **Connect admin account** again |
+| **Access denied. Your signed-in account must be a Fabric administrator…**, or **Dependent workloads could not be determined** with error code `PowerBiHttp403` | The account isn't a Fabric administrator, or `Tenant.Read.All` has no admin consent | Choose **Connect again** with a Fabric administrator, or grant the consent |
+| **Owner names unavailable** (error code `DirectoryAccessUnavailable`) | No Microsoft Graph permission has admin consent | Add the Graph permissions, grant admin consent, then select **Retry name lookups** |
+| **Some owner names can't be read** | The Graph permission named in the notice is missing or has no admin consent | Add it, grant admin consent, then select **Retry name lookups** |
+| An owner marked **Not found in Microsoft Entra ID** | The user, group, or service principal no longer exists | Nothing to grant; its ID stays visible |
+| An owner marked **Name lookup failed** | A temporary Microsoft Graph error | **Refresh inventory** looks the name up again |
+| Only in the deployed app: **Dependent workloads could not be determined** with error code `NetworkError`, or owners marked **Name lookup failed** | The host's Content-Security-Policy, if it sets one, blocks these APIs | Allow `https://api.powerbi.com` and `https://graph.microsoft.com` in its `connect-src` |
+
+**Retry name lookups** requests a fresh Microsoft Graph token, so newly granted
+permissions apply without signing in again. If names still don't appear, choose
+**Connect again**.
+
+### Updating an existing deployment
+
+If you deployed an earlier version, which showed only owner IDs and no dependent
+workloads:
+
+1. Add the Microsoft Graph permissions you need from
+   [API permissions](#api-permissions) and grant admin consent. Your existing
+   Power BI `Tenant.Read.All` consent already covers dependent workloads.
+2. Rebuild and redeploy with the commands in step 3, then verify as in step 4.
+
+No new redirect URIs, `.env` settings, or `rayfin/rayfin.yml` changes are needed.
 
 ### Optional local development
 
@@ -156,7 +227,8 @@ For administrator sign-in locally, explicitly register
 `VITE_ADMIN_HOSTED_ORIGIN='http://localhost:5173'` in
 `packages/frontend/.env.development.local`. Vite reads that file only for the
 development server, so production builds keep the hosted origin from `.env`.
-HTTP is accepted only for loopback development origins.
+HTTP is accepted only for loopback development origins. The local app uses the
+same app registration, so its API permissions and consent apply unchanged.
 
 ```sh
 npm run dev -- --workspace-id <your-workspace-id>
@@ -177,9 +249,9 @@ npm run -w @rayfin-app/frontend dev -- --port 5173 --strictPort
 ## Authentication and data boundaries
 
 The outer Fabric AuthGate and protected static hosting remain enabled.
-Administrator API requests use **each signed-in user's delegated token**, not an
-app-owner token or a service principal. Database, storage, and Functions services
-are disabled.
+Fabric, Power BI, and Microsoft Graph requests use **each signed-in user's
+delegated token**, not an app-owner token or a service principal. Database,
+storage, and Functions services are disabled.
 
 MSAL holds the administrator session in memory only. Reloading may require a new
 explicit connection. Disconnect immediately clears the inventory and the app's
@@ -204,8 +276,13 @@ navigation is pinned to `https://login.microsoftonline.com`. Only authentication
 uses temporary windows; the inventory remains in Fabric. The relay page is not
 a new OAuth callback and needs no additional Entra redirect URI.
 
-Results remain in the current browser's memory. There is no app database,
-automatic export, or committed inventory. Sequential API reads are not an atomic
+Results, including owner names and dependent workloads, remain in the current
+browser's memory. There is no app database, automatic export, or committed
+inventory. Every inventory load or refresh starts read-only metadata scans, and
+Fabric keeps each scan result available for 24 hours. Name lookups read only
+these directory properties: `id`, `displayName`, `userPrincipalName`, and `mail`
+for users; `id`, `displayName`, and `mail` for groups; and `id`, `displayName`,
+and `appId` for service principals. Sequential API reads are not an atomic
 snapshot; connections may change during enumeration.
 
 ## Interpreting results
@@ -216,26 +293,28 @@ snapshot; connections may change during enumeration.
   without one can be selected with the **Not provided** filter option.
 - Fabric's role-assignment API often returns only the principal ID and type. The
   app then looks up users, groups, and service principals by ID in Microsoft
-  Entra ID and shows the name next to the ID; names are never guessed. A
+  Entra ID and shows the name next to the ID; names are never guessed. Other
+  principal types, such as service principal profiles, keep showing their ID. A
   principal that no longer exists is marked "Not found in Microsoft Entra ID".
   Names Fabric does return are used as-is. If the app's Microsoft Graph
-  permissions are missing, a notice names the permission to grant; **Retry name
-  lookups** then uses a fresh token, so newly granted permissions apply without
-  signing in again.
+  permissions are missing, a notice names the permission to grant (see
+  [Troubleshooting permissions](#troubleshooting-permissions)).
 - Dependent workloads come from the Fabric admin metadata scanner, which scans
   every workspace (including personal and inactive ones) in batches of 100. An
   item is listed when the scanner reports it bound to the connection (its data
   source ID is the connection ID); items in non-active workspaces are labeled
   with the workspace state, and misconfigured bindings are flagged. The scanner
   reports bindings for semantic models, dataflows, datamarts, and Fabric items
-  such as data pipelines, Copy jobs, and lakehouse shortcuts. Connections used
-  only from code, such as in notebooks, are not detected, so "Not used by any
-  workload" means no scanned item is bound to the connection.
+  such as data pipelines, Copy jobs, and lakehouses. Connections used only from
+  code, such as in notebooks, are not detected, so "Not used by any workload"
+  means no scanned item is bound to the connection.
 - The scanner runs alongside the inventory with at most 3 concurrent scans, well
-  within its limits (16 simultaneous `getInfo` requests, 500 per hour; the
-  workspace list allows 30 requests per hour). If some workspaces cannot be
-  scanned, the results are marked incomplete and **Retry workspace scan** runs
-  the scan again.
+  within its limits (16 simultaneous `getInfo` requests and 500 per hour). Every
+  inventory load or refresh lists workspaces once, and Fabric allows 30
+  workspace lists per hour; beyond that, the workspace scan waits or asks you to
+  retry later, while the connection inventory still loads. If some workspaces
+  cannot be scanned, the results are marked incomplete and **Retry workspace
+  scan** runs the scan again.
 - Names and user principal names are shown only when Fabric or Microsoft Entra
   ID returns them. Otherwise, the principal ID and type remain visible.
 - "No owners returned" describes the role-assignment response. It is not proof
@@ -250,17 +329,20 @@ snapshot; connections may change during enumeration.
   60-second quota window. After throttling, it slows down for the rest of the
   run. If throttling persists through three pauses without progress (backing off
   exponentially), or Fabric asks for a wait longer than 10 minutes, the run stops
-  and shows when to try again.
+  and shows when to try again. The workspace scan handles Power BI throttling the
+  same way.
 - Completed owner results are kept when a run stops or is cancelled after the
   connection list is complete. **Resume owner lookups** (or **Retry failed owner
   lookups**) requests only unresolved or failed owners, without listing
-  connections again; **Refresh inventory** starts over.
+  connections again. **Refresh inventory** starts over: it lists connections and
+  scans workspaces again, and retries owner names that could not be read.
+  **Cancel** stops both the inventory and the workspace scan.
 
 ## Project layout and checks
 
 ```text
 packages/frontend/       React UI, protected app shell, MSAL sign-in and orchestration
-packages/shared/         Browser-safe API client, contracts and API tests
+packages/shared/         Browser-safe Fabric, Power BI scanner and Microsoft Graph clients, contracts and API tests
 packages/data/           Empty schema retained by the official Rayfin template
 rayfin/rayfin.yml        Protected Fabric App service configuration
 ```
@@ -274,7 +356,7 @@ npm test
 
 Tests use synthetic fixtures. A clean build does not prove that a new tenant has
 granted the required consent or that its administrator has API access; verify the
-deployed app with that tenant's account.
+deployed app with that tenant's account, as in step 4.
 
 ## Sharing and license
 
@@ -293,4 +375,6 @@ its copyright and license notices. See [LICENSE](LICENSE).
 - [Admin List Connection Role Assignments](https://learn.microsoft.com/en-us/rest/api/fabric/admin/connections/list-connection-role-assignments)
 - [Metadata scanning (scanner API)](https://learn.microsoft.com/en-us/fabric/governance/metadata-scanning-overview)
 - [Microsoft Graph JSON batching](https://learn.microsoft.com/en-us/graph/json-batching)
+- [Microsoft Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference)
+- [Grant tenant-wide admin consent](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/grant-admin-consent)
 - [Microsoft Entra SPA configuration](https://learn.microsoft.com/en-us/entra/identity-platform/scenario-spa-app-configuration)
