@@ -1,11 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FabricInventory, InventoryError, connection, requireTenantAdminToken, safeResult } from '../dist/fabric-api.js';
+import {
+  DEFAULT_THROTTLE_WAIT_MS, FabricInventory, InventoryError, connection, delay, requireTenantAdminToken, safeResult,
+} from '../dist/fabric-api.js';
 
 const first = '11111111-1111-4111-8111-111111111111';
 const second = '22222222-2222-4222-8222-222222222222';
+const third = '44444444-4444-4444-8444-444444444444';
 const tenant = '33333333-3333-4333-8333-333333333333';
 const json = (body) => Response.json(body);
+const throttled = (body, headers = {}) => new Response(body === undefined ? null : JSON.stringify(body), {
+  status: 429, headers: { 'content-type': 'application/json', ...headers },
+});
 const assignment = (id, role = 'Owner') => ({ role, principal: { id, type: 'User', displayName: 'Synthetic owner', userDetails: { userPrincipalName: 'owner@example.test' } } });
 
 test('only returns requested metadata, never credential payloads', () => {
@@ -71,34 +77,92 @@ test('repeated ownership continuation token returns explicit incomplete failure'
   assert.equal(result.results[0].result.error.code, 'PaginationLoop');
 });
 
-test('honors Retry-After seconds before retrying', async () => {
-  let clock = 0;
+test('reports Retry-After as a retry time instead of waiting inside the request', async () => {
   let count = 0;
   const delays = [];
-  const api = new FabricInventory('synthetic', async () => ++count === 1 ?
-    new Response(null, { status: 429, headers: { 'retry-after': '7' } }) : json({ value: [] }),
-  () => clock, async (ms) => { delays.push(ms); clock += ms; });
-  assert.deepEqual(await api.listConnections(''), { connections: [], nextToken: null });
-  assert.deepEqual(delays, [7000]);
+  const api = new FabricInventory('synthetic', async () => {
+    count++;
+    return throttled(undefined, { 'retry-after': '7' });
+  }, () => 1_000, async (ms) => { delays.push(ms); });
+  await assert.rejects(() => api.listConnections(''), (error) =>
+    error.failure.code === 'FabricHttp429' && error.failure.status === 429 && error.failure.retryAt === 8_000);
+  assert.equal(count, 1);
+  assert.deepEqual(delays, []);
 });
 
-test('carries a Retry-After delay into the next batch', async () => {
+test('does not call Fabric during a throttling window, then continues with the next batch token', async () => {
   let clock = 0;
-  let count = 0;
-  const delays = [];
   const tokens = [];
   const api = new FabricInventory('first-token', async (url, options) => {
     tokens.push(options.headers.Authorization);
-    return ++count === 1 ?
-      new Response(null, { status: 503, headers: { 'retry-after': '300' } }) : json({ value: [] });
-  }, () => clock, async (ms) => { delays.push(ms); clock += ms; });
-  // The first batch cannot wait 300s within its budget and gives up without sleeping.
-  await assert.rejects(() => api.listConnections(''), (error) => error.failure.code === 'RetryBudgetExceeded');
-  clock = 250_000;
-  await api.nextBatch('second-token').listConnections('');
-  // The next batch still waits out the remaining 50s instead of calling Fabric immediately.
-  assert.deepEqual(delays, [50_000]);
+    return tokens.length === 1 ? throttled(undefined, { 'retry-after': '30' }) : json({ value: [] });
+  }, () => clock, async (ms) => { clock += ms; });
+  await assert.rejects(() => api.listConnections(''), (error) => error.failure.retryAt === 30_000);
+  clock = 29_000;
+  await assert.rejects(() => api.listConnections(''), (error) =>
+    error.failure.code === 'FabricHttp429' && error.failure.retryAt === 30_000);
+  assert.equal(tokens.length, 1);
+  clock = 30_000;
+  assert.deepEqual(await api.nextBatch('second-token').listConnections(''), { connections: [], nextToken: null });
   assert.deepEqual(tokens, ['Bearer first-token', 'Bearer second-token']);
+});
+
+test('reads the blocked-until time from the throttling body when CORS hides Retry-After', async () => {
+  const now = Date.UTC(2026, 1, 18, 22, 44, 0);
+  let count = 0;
+  const result = await safeResult(() => new FabricInventory('synthetic', async () => {
+    count++;
+    return throttled({
+      errorCode: 'RequestBlocked',
+      message: 'Request is blocked by the upstream service until: 2/18/2026 10:45:04 PM (UTC)',
+    });
+  }, () => now).listConnections(''));
+  assert.equal(count, 1);
+  assert.equal(result.error.code, 'FabricHttp429');
+  assert.equal(result.error.status, 429);
+  // One second of margin after the time Fabric reported.
+  assert.equal(result.error.retryAt, Date.UTC(2026, 1, 18, 22, 45, 5));
+});
+
+test('falls back to one quota window when no plausible retry time is readable', async () => {
+  const now = Date.UTC(2026, 1, 18, 22, 44, 0);
+  const blocked = (until) => ({ errorCode: 'RequestBlocked', message: `Request is blocked by the upstream service until: ${until} (UTC)` });
+  const capacity = {
+    errorCode: 'CapacityLimitExceeded',
+    message: "Your organization's Fabric compute capacity has exceeded its limits. Try again later.",
+  };
+  for (const body of [undefined, capacity, blocked('2/31/2026 10:45:04 PM'), blocked('2/20/2026 10:45:04 PM'), blocked('2/18/2026 9:00:00 PM')]) {
+    const api = new FabricInventory('synthetic', async () => throttled(body), () => now);
+    await assert.rejects(() => api.listConnections(''), (error) => error.failure.retryAt === now + DEFAULT_THROTTLE_WAIT_MS);
+  }
+  const api = new FabricInventory('synthetic', async () => throttled(capacity), () => now);
+  await assert.rejects(() => api.listConnections(''), (error) => /capacity is overloaded/.test(error.failure.message));
+});
+
+test('reserves separate request slots for concurrent owner lookups', async () => {
+  const delays = [];
+  const api = new FabricInventory('synthetic', async () => json({ value: [] }), () => 0, async (ms) => { delays.push(ms); });
+  const result = await api.listConnectionOwners([first, second, third]);
+  assert.ok(result.results.every((lookup) => lookup.result.ok));
+  assert.deepEqual(delays, [200, 400]);
+});
+
+test('doubles the gap between requests after throttling', async () => {
+  let clock = 0;
+  let status = 200;
+  const delays = [];
+  const api = new FabricInventory('synthetic', async () => status === 429 ?
+    throttled(undefined, { 'retry-after': '1' }) : json({ value: [] }),
+  () => clock, async (ms) => { delays.push(ms); clock += ms; });
+  await api.listConnections('');
+  await api.listConnections('');
+  status = 429;
+  await assert.rejects(() => api.listConnections(''), (error) => error.failure.retryAt === 1_400);
+  status = 200;
+  clock = 1_400;
+  await api.listConnections('');
+  await api.listConnections('');
+  assert.deepEqual(delays, [200, 200, 400]);
 });
 
 test('reports a 503 that persists after bounded retries with its status', async () => {
@@ -113,6 +177,19 @@ test('reports a 503 that persists after bounded retries with its status', async 
   assert.equal(result.error.status, 503);
 });
 
+test('reports a long 503 Retry-After with its retry time instead of sleeping through it', async () => {
+  let count = 0;
+  const delays = [];
+  const api = new FabricInventory('synthetic', async () => {
+    count++;
+    return new Response(null, { status: 503, headers: { 'retry-after': '300' } });
+  }, () => 0, async (ms) => { delays.push(ms); });
+  await assert.rejects(() => api.listConnections(''), (error) =>
+    error.failure.code === 'FabricHttp503' && error.failure.retryAt === 300_000);
+  assert.equal(count, 1);
+  assert.deepEqual(delays, []);
+});
+
 test('a user cancellation propagates as an abort, not a timeout or per-row failure', async () => {
   const controller = new AbortController();
   const api = new FabricInventory('synthetic', async () => {
@@ -122,24 +199,13 @@ test('a user cancellation propagates as an abort, not a timeout or per-row failu
   await assert.rejects(() => safeResult(() => api.listConnections('')), (error) => error.name === 'AbortError');
 });
 
-test('never retries before Retry-After when the required wait exceeds the invocation budget', async () => {
-  let count = 0;
-  const api = new FabricInventory('synthetic', async () => {
-    count++;
-    return new Response(null, { status: 429, headers: { 'retry-after': '300' } });
-  }, () => 0, async () => { assert.fail('must not sleep past deadline'); });
-  await assert.rejects(() => api.listConnections(''), (error) => error.failure.code === 'RetryBudgetExceeded');
-  assert.equal(count, 1);
-});
-
-test('does not retry a throttled browser request when CORS hides Retry-After', async () => {
-  let count = 0;
-  const result = await safeResult(() => new FabricInventory('synthetic', async () => {
-    count++;
-    return new Response(null, { status: 429 });
-  }).listConnections(''));
-  assert.equal(result.error.status, 429);
-  assert.equal(count, 1);
+test('a cancellable delay rejects as soon as the run is cancelled', async () => {
+  const controller = new AbortController();
+  const started = Date.now();
+  const waiting = delay(60_000, controller.signal);
+  controller.abort();
+  await assert.rejects(waiting, (error) => error.name === 'AbortError');
+  assert.ok(Date.now() - started < 1_000);
 });
 
 test('403 is surfaced immediately, without user-scoped fallback or retry', async () => {

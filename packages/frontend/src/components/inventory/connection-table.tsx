@@ -90,7 +90,9 @@ function ConnectionDetails({ row }: { row: ConnectionRow }) {
               Request ID: {row.ownerError.requestId}
             </p>
           )}
-          <p className="text-200 text-muted-foreground">Refresh the inventory to retry owner lookups.</p>
+          <p className="text-200 text-muted-foreground">
+            Retry owner lookups from the status panel above; connections do not need to be reloaded.
+          </p>
         </div>
       )}
     </div>

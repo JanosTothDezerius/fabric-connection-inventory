@@ -6,6 +6,107 @@ const API_ROOT = 'https://api.fabric.microsoft.com/v1/admin/connections';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+const REQUEST_TIMEOUT_MS = 25_000;
+/** Minimum gap between request starts, so a large tenant does not burst through the caller's quota. */
+const REQUEST_INTERVAL_MS = 200;
+/** Throttling doubles the gap for the rest of the run, up to this limit. */
+const MAX_REQUEST_INTERVAL_MS = 3_000;
+/** Many Fabric rate limits use fixed one-minute windows; wait one window when no retry time is readable. */
+export const DEFAULT_THROTTLE_WAIT_MS = 60_000;
+/** A 503 is retried in place only for short waits; longer waits are reported with their retry time. */
+const MAX_IN_PLACE_RETRY_MS = 30_000;
+/** A retry time read from a throttling message is trusted only within these bounds. */
+const MAX_MESSAGE_HINT_MS = 24 * 60 * 60_000;
+const MAX_CLOCK_SKEW_MS = 5 * 60_000;
+// Fabric's RequestBlocked message, for example:
+// "Request is blocked by the upstream service until: 2/18/2026 10:45:04 PM (UTC)"
+const BLOCKED_UNTIL = /\buntil:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})\s*([AP]M)?\s*\(UTC\)/i;
+
+/** Resolves after `ms`, or rejects with the abort reason as soon as `signal` aborts. */
+export function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cancelled = () => signal?.reason ?? new DOMException('Cancelled', 'AbortError');
+    if (signal?.aborted) {
+      reject(cancelled());
+      return;
+    }
+    const abort = () => {
+      clearTimeout(timer);
+      reject(cancelled());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    }, Math.max(0, ms));
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+function retryAfterMs(value: string | null, now: number): number | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (/^\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed) * 1_000;
+  const date = Date.parse(trimmed);
+  return Number.isFinite(date) ? Math.max(0, date - now) : undefined;
+}
+
+function blockedUntil(message: unknown): number | undefined {
+  if (typeof message !== 'string') return undefined;
+  const match = BLOCKED_UNTIL.exec(message);
+  if (!match) return undefined;
+  const [month, day, year, hour, minute, second] = match.slice(1, 7).map(Number);
+  const meridiem = match[7]?.toUpperCase();
+  if (meridiem ? hour < 1 || hour > 12 : hour > 23) return undefined;
+  const time = Date.UTC(year, month - 1, day, meridiem ? hour % 12 + (meridiem === 'PM' ? 12 : 0) : hour, minute, second);
+  const parsed = new Date(time);
+  // Date.UTC silently rolls over impossible values such as 2/31; reject them instead.
+  return parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day && minute < 60 && second < 60 ?
+    time : undefined;
+}
+
+function throttleRetryAt(header: string | null, message: unknown, now: number): number | undefined {
+  const wait = retryAfterMs(header, now);
+  if (wait !== undefined) return now + wait;
+  // Browsers cannot read Retry-After unless Fabric exposes it to CORS, but the response body is readable.
+  const until = blockedUntil(message);
+  if (until === undefined || until - now > MAX_MESSAGE_HINT_MS || now - until > MAX_CLOCK_SKEW_MS) return undefined;
+  return Math.max(until + 1_000, now + 1_000);
+}
+
+/** Reads a body up to `maxBytes`; returns null when it is larger. */
+async function readText(response: Response, maxBytes: number): Promise<string | null> {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  let size = 0;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      size += result.value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel();
+        return null;
+      }
+      text += decoder.decode(result.value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return text + decoder.decode();
+}
+
+async function readErrorBody(response: Response): Promise<Record<string, unknown>> {
+  try {
+    const text = await readText(response, MAX_ERROR_BODY_BYTES);
+    const body: unknown = text ? JSON.parse(text) : undefined;
+    return body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
 
 export class InventoryError extends Error {
   constructor(readonly failure: ApiFailure) {
@@ -156,27 +257,71 @@ export function requireTenantAdminToken(getToken: () => string, expectedTenantId
 }
 
 export class FabricInventory {
-  private deadline: number;
-  private retryAt = 0;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private nextRequestAt = 0;
+  private throttledUntil = 0;
 
   constructor(
     private token: string,
     private readonly request: typeof fetch = fetch,
     private readonly now: () => number = Date.now,
-    private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    sleep?: (ms: number) => Promise<void>,
     private readonly abortSignal?: AbortSignal,
+    private requestIntervalMs = REQUEST_INTERVAL_MS,
   ) {
-    this.deadline = now() + 120_000;
+    this.sleep = sleep ?? ((ms) => delay(ms, abortSignal));
   }
 
-  /**
-   * Starts another request batch with a fresh token and wait budget. The
-   * Retry-After time already requested by Fabric carries over between batches.
-   */
+  /** Uses a fresh token for the next request batch. Pacing and any throttling window carry over. */
   nextBatch(token: string): this {
     this.token = token;
-    this.deadline = this.now() + 120_000;
     return this;
+  }
+
+  private assertNotThrottled(): void {
+    if (this.throttledUntil > this.now()) {
+      throw new InventoryError({
+        code: 'FabricHttp429',
+        message: 'Fabric is throttling requests.',
+        status: 429,
+        retryAt: this.throttledUntil,
+      });
+    }
+  }
+
+  /** Spaces request starts, including concurrent ones, and never calls Fabric during a throttling window. */
+  private async waitForTurn(): Promise<void> {
+    this.abortSignal?.throwIfAborted();
+    this.assertNotThrottled();
+    const now = this.now();
+    const start = Math.max(now, this.nextRequestAt);
+    this.nextRequestAt = start + this.requestIntervalMs;
+    if (start > now) {
+      await this.sleep(start - now);
+      this.abortSignal?.throwIfAborted();
+      this.assertNotThrottled();
+    }
+  }
+
+  private async throttled(response: Response, requestId: string | undefined): Promise<InventoryError> {
+    const body = await readErrorBody(response);
+    const now = this.now();
+    const retryAt = throttleRetryAt(response.headers.get('retry-after'), body.message, now) ??
+      now + DEFAULT_THROTTLE_WAIT_MS;
+    if (this.throttledUntil <= now) {
+      // Fabric recommends reducing request volume after throttling; keep the slower pace for this run.
+      this.requestIntervalMs = Math.min(Math.max(this.requestIntervalMs * 2, REQUEST_INTERVAL_MS), MAX_REQUEST_INTERVAL_MS);
+    }
+    this.throttledUntil = Math.max(this.throttledUntil, retryAt);
+    return new InventoryError({
+      code: 'FabricHttp429',
+      message: body.errorCode === 'CapacityLimitExceeded' ?
+        'The Fabric capacity is overloaded, so Fabric is throttling requests.' :
+        'Fabric is throttling requests.',
+      status: 429,
+      requestId,
+      retryAt: this.throttledUntil,
+    });
   }
 
   private async get(path: string, continuationToken: string): Promise<unknown> {
@@ -185,14 +330,8 @@ export class FabricInventory {
     }
     const url = new URL(API_ROOT + path);
     if (continuationToken) url.searchParams.set('continuationToken', continuationToken);
-    for (let attempt = 0; attempt < 3; attempt++) {
-      this.abortSignal?.throwIfAborted();
-      const delay = Math.max(0, this.retryAt - this.now());
-      if (this.now() + delay + 1_000 >= this.deadline) {
-        throw new InventoryError({ code: 'RetryBudgetExceeded', message: 'Fabric requested more wait time than this request batch allows. Wait and refresh the inventory.' });
-      }
-      if (delay) await this.sleep(delay);
-      this.abortSignal?.throwIfAborted();
+    for (let attempt = 0; ; attempt++) {
+      await this.waitForTurn();
       let response: Response;
       try {
         const request = this.request;
@@ -202,8 +341,8 @@ export class FabricInventory {
           redirect: 'error',
           credentials: 'omit',
           signal: this.abortSignal ?
-            AbortSignal.any([this.abortSignal, AbortSignal.timeout(Math.min(25_000, this.deadline - this.now()))]) :
-            AbortSignal.timeout(Math.min(25_000, this.deadline - this.now())),
+            AbortSignal.any([this.abortSignal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) :
+            AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
       } catch (error) {
         // A user cancellation is not a timeout; let it propagate as an abort.
@@ -215,22 +354,22 @@ export class FabricInventory {
       }
       const requestId = response.headers.get('request-id') ?? response.headers.get('requestid') ??
         response.headers.get('x-ms-request-id') ?? undefined;
-      if ((response.status === 429 || response.status === 503) && attempt < 2) {
-        const retryAfter = response.headers.get('retry-after');
-        if (response.status === 429 && !retryAfter) {
-          await response.body?.cancel();
+      // Throttling is reported with its retry time; the caller decides whether to wait.
+      if (response.status === 429) throw await this.throttled(response, requestId);
+      if (response.status === 503 && attempt < 2) {
+        const wait = retryAfterMs(response.headers.get('retry-after'), this.now()) ?? 1_000 * 2 ** attempt;
+        await response.body?.cancel();
+        if (wait > MAX_IN_PLACE_RETRY_MS) {
           throw new InventoryError({
-            code: 'FabricHttp429',
-            message: 'Fabric is throttling requests. Its Retry-After header is not exposed to this browser, so automatic retries have stopped. Wait before refreshing again.',
-            status: 429,
+            code: 'FabricHttp503',
+            message: 'Fabric is temporarily unavailable.',
+            status: 503,
             requestId,
+            retryAt: this.now() + wait,
           });
         }
-        const seconds = retryAfter && /^\d+(\.\d+)?$/.test(retryAfter) ? Number(retryAfter) : NaN;
-        const retryMs = Number.isFinite(seconds) ? seconds * 1_000 :
-          retryAfter && Number.isFinite(Date.parse(retryAfter)) ? Math.max(0, Date.parse(retryAfter) - this.now()) : 1_000 * 2 ** attempt;
-        this.retryAt = Math.max(this.retryAt, this.now() + retryMs);
-        await response.body?.cancel();
+        await this.sleep(wait);
+        this.abortSignal?.throwIfAborted();
         continue;
       }
       if (!response.ok) {
@@ -239,37 +378,21 @@ export class FabricInventory {
           'Access denied. Your signed-in account must be a Fabric administrator and have delegated Tenant.Read.All consent for this app.' :
           response.status === 401 ? 'Fabric rejected the resource token. Check its audience, expiry, consent, and the admin API identity requirements.' :
           response.status === 404 ? 'This connection or admin API was not found. The connection may have been deleted, or the preview API may be unavailable.' :
-          response.status === 429 ? 'Fabric is throttling requests. Wait before refreshing the inventory.' :
-          response.status === 503 ? 'Fabric remained unavailable after bounded retries. Wait before refreshing the inventory.' :
+          response.status === 503 ? 'Fabric remained unavailable after bounded retries.' :
           `Fabric returned HTTP ${response.status}. Retry or use the request ID to investigate.`;
         throw new InventoryError({ code: `FabricHttp${response.status}`, message, status: response.status, requestId });
       }
       if (!response.body) invalidResponse();
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let responseText = '';
-      let size = 0;
-      try {
-        while (true) {
-          const result = await reader.read();
-          if (result.done) break;
-          size += result.value.byteLength;
-          if (size > MAX_RESPONSE_BYTES) {
-            await reader.cancel();
-            throw new InventoryError({ code: 'ResponseTooLarge', message: 'The Fabric API response exceeded the safe read limit. No partial page was accepted.' });
-          }
-          responseText += decoder.decode(result.value, { stream: true });
-        }
-      } finally {
-        reader.releaseLock();
+      const responseText = await readText(response, MAX_RESPONSE_BYTES);
+      if (responseText === null) {
+        throw new InventoryError({ code: 'ResponseTooLarge', message: 'The Fabric API response exceeded the safe read limit. No partial page was accepted.' });
       }
       try {
-        return JSON.parse(responseText + decoder.decode()) as unknown;
+        return JSON.parse(responseText) as unknown;
       } catch {
         invalidResponse();
       }
     }
-    throw new InventoryError({ code: 'RetryLimitExceeded', message: 'Fabric remained unavailable after bounded retries.' });
   }
 
   async listConnections(continuationToken: string): Promise<ConnectionPage> {

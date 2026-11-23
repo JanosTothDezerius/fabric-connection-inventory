@@ -126,6 +126,58 @@ describe('Connection inventory', () => {
     expect(mockLoad).toHaveBeenCalledTimes(2);
   });
 
+  it('resumes unfinished owner lookups without clearing the loaded connections', async () => {
+    const stopped = syntheticSnapshot([
+      syntheticConnection({ id: 'kept', displayName: 'Synthetic kept' }),
+      syntheticConnection({ id: 'unfinished', displayName: 'Synthetic unfinished', ownerStatus: 'pending' }),
+    ], { phase: 'error', updatedAt: null, error: { code: 'FabricHttp429', message: 'Synthetic throttling stopped the run.', status: 429 } });
+    let resumed!: LoadInventoryOptions;
+    mockLoad.mockResolvedValueOnce(stopped).mockImplementationOnce((options) => {
+      resumed = options;
+      return new Promise(() => {});
+    });
+    render(<App />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Synthetic throttling stopped the run.');
+    expect(screen.getByText(/Resuming keeps completed owner results/)).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Resume owner lookups' }));
+    expect(resumed.resumeFrom).toBe(stopped);
+    expect(screen.getByText('Synthetic kept')).toBeVisible();
+    expect(screen.getByText('Synthetic unfinished')).toBeVisible();
+  });
+
+  it('offers to retry only failed owner lookups after a completed refresh', async () => {
+    const finished = syntheticSnapshot([
+      syntheticConnection({ id: 'ok' }),
+      syntheticConnection({ id: 'failed', ownerStatus: 'error', ownerError: { code: 'SyntheticFailure', message: 'Synthetic failure' } }),
+    ]);
+    mockLoad.mockResolvedValueOnce(finished).mockReturnValueOnce(new Promise(() => {}));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry failed owner lookups' }));
+    expect(mockLoad).toHaveBeenCalledTimes(2);
+    expect(mockLoad).toHaveBeenLastCalledWith(expect.objectContaining({ resumeFrom: finished }));
+  });
+
+  it('shows when throttled requests continue automatically', async () => {
+    let options!: LoadInventoryOptions;
+    mockLoad.mockImplementation((value) => {
+      options = value;
+      return new Promise(() => {});
+    });
+    render(<App />);
+    const resumeAt = Date.now() + 42_000;
+    act(() => options.onProgress(syntheticSnapshot([syntheticConnection({ ownerStatus: 'pending' })], {
+      phase: 'owners', updatedAt: null, pausedUntil: resumeAt,
+    })));
+
+    expect(screen.getByText('Paused while Fabric throttles requests')).toBeVisible();
+    expect(screen.getByText(/continue automatically at/)).toHaveTextContent(new Date(resumeAt).toLocaleTimeString());
+    expect(await screen.findByText(/\(in 4[12] s\)/)).toBeVisible();
+    expect(screen.getByRole('button', { name: /^Cancel$/ })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Resume owner lookups' })).not.toBeInTheDocument();
+  });
+
   it('keeps loading and cancellation explicit and clears previous data on refresh', async () => {
     let options!: LoadInventoryOptions;
     let finish!: (value: InventorySnapshot) => void;
