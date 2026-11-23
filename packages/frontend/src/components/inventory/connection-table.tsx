@@ -62,6 +62,9 @@ function Owners({ row }: { row: ConnectionRow }) {
                 {owner.directoryStatus === 'notFound' && (
                   <span className="block">Not found in Microsoft Entra ID</span>
                 )}
+                {owner.directoryStatus === 'denied' && (
+                  <span className="block">Name not readable with this app’s permissions</span>
+                )}
                 {owner.directoryStatus === 'failed' && <span className="block">Name lookup failed</span>}
               </div>
             </li>

@@ -5,7 +5,7 @@ import { NameResolver, principalsNeedingNames, type PrincipalNamesState } from '
 
 /** Looks up, in Microsoft Entra ID, the owner names that Fabric did not return, as owner results arrive. */
 export function usePrincipalNames(connections: readonly ConnectionRow[]) {
-  const [state, setState] = useState<PrincipalNamesState>(() => ({ results: new Map(), loading: false }));
+  const [state, setState] = useState<PrincipalNamesState>(() => ({ results: new Map(), loading: false, access: {} }));
   const resolver = useRef<NameResolver | null>(null);
 
   useEffect(() => {

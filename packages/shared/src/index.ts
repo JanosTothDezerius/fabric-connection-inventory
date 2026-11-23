@@ -14,8 +14,9 @@ export {
   type DependentItem, type WorkspaceScan, type WorkspaceUsage,
 } from './scanner-api.js';
 export {
-  DirectoryLookup, MAX_DIRECTORY_BATCH, isDirectoryPrincipal, requireDirectoryToken,
-  type DirectoryLookupResult, type PrincipalLookup, type PrincipalReference,
+  DIRECTORY_KINDS, DIRECTORY_READ_PERMISSIONS, DirectoryLookup, MAX_DIRECTORY_BATCH, directoryKind, directoryTokenScopes,
+  isDirectoryPrincipal, requireDirectoryToken,
+  type DirectoryKind, type DirectoryLookupResult, type PrincipalLookup, type PrincipalReference,
 } from './directory-api.js';
 
 export interface ApiFailure {

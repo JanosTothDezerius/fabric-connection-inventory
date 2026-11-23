@@ -1,12 +1,18 @@
 import { describe, expect, it } from 'vitest';
+import type { DependentItem } from '@rayfin-app/shared';
 
 import { syntheticConnection, syntheticSnapshot } from '@/test/inventory-fixtures';
 import {
-  CREDENTIAL_TYPE_NOT_PROVIDED, credentialTypeLabel, formatTimestamp, selectConnections, summarizeInventory, withDirectoryNames,
+  CREDENTIAL_TYPE_NOT_PROVIDED, connectorTypeOptions, credentialTypeLabel, credentialTypeOptions, formatTimestamp,
+  selectConnections, summarizeInventory, withDirectoryNames, workspaceOptions, type InventoryFilters,
 } from './inventory-model';
 
-const filters = { search: '', connectorType: '', credentialType: '', ownerStatus: 'all' as const };
+const filters: InventoryFilters = { search: '', connectorTypes: [], credentialTypes: [], workspaceIds: [] };
 const sort = { column: 'displayName' as const, direction: 'asc' as const };
+
+function item(workspaceId: string, workspaceName?: string, workspaceState?: string): DependentItem {
+  return { id: `item-in-${workspaceId}`, name: 'Synthetic item', type: 'Semantic model', workspaceId, workspaceName, workspaceState };
+}
 
 describe('inventory filtering and summaries', () => {
   it('counts only successful empty owner results as having no owners', () => {
@@ -23,8 +29,6 @@ describe('inventory filtering and summaries', () => {
     expect(summarizeInventory(snapshot)).toEqual({
       total: 4, connectorTypes: 1, resolved: 2, pending: 1, failed: 1, noOwners: 1,
     });
-    expect(selectConnections(snapshot.connections, { ...filters, ownerStatus: 'none' }, sort).map((row) => row.id))
-      .toEqual(['empty']);
   });
 
   it.each([
@@ -43,15 +47,73 @@ describe('inventory filtering and summaries', () => {
     expect(selectConnections([row], { ...filters, search: ` ${search} ` }, sort)).toEqual([row]);
   });
 
-  it('combines connector and owner filters without mutating input', () => {
+  it('matches any value selected in one filter and requires every filter, without mutating input', () => {
     const rows = [
-      syntheticConnection({ id: 'wrong-type', connectorType: 'SyntheticWeb', ownerStatus: 'error' }),
-      syntheticConnection({ id: 'match', ownerStatus: 'error' }),
-      syntheticConnection({ id: 'wrong-status' }),
+      syntheticConnection({ id: 'web-oauth', connectorType: 'SyntheticWeb', credentialType: 'OAuth2' }),
+      syntheticConnection({ id: 'sql-oauth', credentialType: 'OAuth2' }),
+      syntheticConnection({ id: 'sql-key', credentialType: 'Key' }),
+      syntheticConnection({ id: 'file-oauth', connectorType: 'SyntheticFile', credentialType: 'OAuth2' }),
     ];
-    expect(selectConnections(rows, { ...filters, connectorType: 'SyntheticSQL', ownerStatus: 'error' }, sort).map((row) => row.id))
-      .toEqual(['match']);
-    expect(rows.map((row) => row.id)).toEqual(['wrong-type', 'match', 'wrong-status']);
+    const select = (update: Partial<InventoryFilters>) =>
+      selectConnections(rows, { ...filters, ...update }, sort).map((row) => row.id);
+
+    expect(select({ connectorTypes: ['SyntheticSQL', 'SyntheticWeb'] }).sort()).toEqual(['sql-key', 'sql-oauth', 'web-oauth']);
+    expect(select({ connectorTypes: ['SyntheticSQL', 'SyntheticWeb'], credentialTypes: ['OAuth2'] }).sort())
+      .toEqual(['sql-oauth', 'web-oauth']);
+    expect(rows.map((row) => row.id)).toEqual(['web-oauth', 'sql-oauth', 'sql-key', 'file-oauth']);
+  });
+
+  it('filters by workspace using dependent workloads, showing a connection for each of its workspaces', () => {
+    const rows = [
+      syntheticConnection({ id: 'Shared', displayName: 'Synthetic shared' }),
+      syntheticConnection({ id: 'finance-only', displayName: 'Synthetic finance' }),
+      syntheticConnection({ id: 'unused', displayName: 'Synthetic unused' }),
+    ];
+    const items = new Map([
+      ['shared', [item('finance'), item('sales')]],
+      ['finance-only', [item('finance')]],
+    ]);
+    const select = (workspaceIds: string[]) =>
+      selectConnections(rows, { ...filters, workspaceIds }, sort, items).map((row) => row.id);
+
+    expect(select(['finance'])).toEqual(['finance-only', 'Shared']);
+    expect(select(['sales'])).toEqual(['Shared']);
+    expect(select(['finance', 'sales'])).toEqual(['finance-only', 'Shared']);
+    expect(select([])).toHaveLength(3);
+    expect(selectConnections(rows, { ...filters, workspaceIds: ['finance'] }, sort)).toEqual([]);
+  });
+
+  it('builds filter options with connection counts and keeps selected values that no longer match', () => {
+    const rows = [
+      syntheticConnection({ id: 'a', credentialType: 'ServicePrincipal' }),
+      syntheticConnection({ id: 'b', connectorType: 'SyntheticWeb', credentialType: 'OAuth2' }),
+      syntheticConnection({ id: 'c' }),
+    ];
+    expect(connectorTypeOptions(rows, ['Gone'])).toEqual([
+      { value: 'Gone', label: 'Gone', count: 0 },
+      { value: 'SyntheticSQL', label: 'SyntheticSQL', count: 2 },
+      { value: 'SyntheticWeb', label: 'SyntheticWeb', count: 1 },
+    ]);
+    expect(credentialTypeOptions(rows, [])).toEqual([
+      { value: 'OAuth2', label: 'OAuth2', count: 1 },
+      { value: 'ServicePrincipal', label: 'Service Principal', count: 1 },
+      { value: CREDENTIAL_TYPE_NOT_PROVIDED, label: 'Not provided', count: 1 },
+    ]);
+  });
+
+  it('lists workspaces with dependent workloads, telling apart workspaces that share a name', () => {
+    const rows = [syntheticConnection({ id: 'a' }), syntheticConnection({ id: 'b' })];
+    const items = new Map([
+      ['a', [item('11111111-aaaa', 'Sales'), item('22222222-bbbb', 'Sales'), item('33333333-cccc', 'Archive', 'Deleted')]],
+      ['b', [item('11111111-aaaa', 'Sales'), item('11111111-aaaa', 'Sales')]],
+      ['not-loaded', [item('44444444-dddd', 'Elsewhere')]],
+    ]);
+    expect(workspaceOptions(rows, items, ['55555555-eeee'])).toEqual([
+      { value: '55555555-eeee', label: '55555555-eeee', count: 0 },
+      { value: '33333333-cccc', label: 'Archive (Deleted)', count: 1 },
+      { value: '11111111-aaaa', label: 'Sales (11111111)', count: 2 },
+      { value: '22222222-bbbb', label: 'Sales (22222222)', count: 1 },
+    ]);
   });
 
   it('sorts numerically with a stable id tie-breaker in either direction', () => {
@@ -80,8 +142,9 @@ describe('inventory filtering and summaries', () => {
     const select = (update: Partial<typeof filters>) =>
       selectConnections(rows, { ...filters, ...update }, sort).map((row) => row.id);
 
-    expect(select({ credentialType: 'ServicePrincipal' })).toEqual(['principal']);
-    expect(select({ credentialType: CREDENTIAL_TYPE_NOT_PROVIDED })).toEqual(['missing']);
+    expect(select({ credentialTypes: ['ServicePrincipal'] })).toEqual(['principal']);
+    expect(select({ credentialTypes: [CREDENTIAL_TYPE_NOT_PROVIDED] })).toEqual(['missing']);
+    expect(select({ credentialTypes: ['ServicePrincipal', CREDENTIAL_TYPE_NOT_PROVIDED] })).toEqual(['missing', 'principal']);
     expect(select({ search: 'oauth2' })).toEqual(['oauth']);
     expect(['ServicePrincipal', 'OAuth2', 'WindowsWithoutImpersonation', undefined].map(credentialTypeLabel))
       .toEqual(['Service Principal', 'OAuth2', 'Windows Without Impersonation', 'Not provided']);

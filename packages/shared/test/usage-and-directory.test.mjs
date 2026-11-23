@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DirectoryLookup, InventoryError, WorkspaceScanner, connectionUsageFromScan, isDirectoryPrincipal, requireDirectoryToken,
+  DirectoryLookup, InventoryError, WorkspaceScanner, connectionUsageFromScan, directoryKind, directoryTokenScopes,
+  isDirectoryPrincipal, requireDirectoryToken,
 } from '../dist/index.js';
 
 const workspace = '11111111-1111-4111-8111-111111111111';
@@ -161,6 +162,8 @@ test('a missing Graph batch response is a failure, not an absent name', async ()
 
 test('only users, groups and service principals with GUIDs are sent to Microsoft Graph', async () => {
   assert.equal(isDirectoryPrincipal({ id: user, type: 'user' }), true);
+  assert.deepEqual(['User', 'GROUP', 'ServicePrincipal', 'ServicePrincipalProfile', undefined].map(directoryKind),
+    ['user', 'group', 'servicePrincipal', undefined, undefined]);
   for (const principal of [
     { id: user, type: 'ServicePrincipalProfile' }, { id: user, type: 'EntireTenant' }, { id: user, type: 'constructor' },
     { id: 'not-a-guid', type: 'User' },
@@ -178,6 +181,8 @@ test('the Graph token guard pins the tenant and requires a delegated token', () 
   const encode = (claims) => `header.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.signature`;
   const valid = encode({ tid: tenant, scp: 'User.ReadBasic.All GroupMember.Read.All' });
   assert.equal(requireDirectoryToken(valid, tenant), valid);
+  assert.deepEqual(directoryTokenScopes(valid), ['User.ReadBasic.All', 'GroupMember.Read.All']);
+  assert.deepEqual(directoryTokenScopes(encode({ tid: tenant, roles: ['User.Read.All'] })), []);
   assert.throws(() => requireDirectoryToken(encode({ tid: workspace, scp: 'User.ReadBasic.All' }), tenant), (error) => error.failure.code === 'WrongTenant');
   assert.throws(() => requireDirectoryToken(encode({ tid: tenant, roles: ['User.Read.All'] }), tenant), (error) => error.failure.code === 'DelegatedTokenRequired');
   assert.throws(() => requireDirectoryToken('not-a-token', tenant), (error) => {

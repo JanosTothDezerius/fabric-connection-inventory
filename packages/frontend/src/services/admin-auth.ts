@@ -2,7 +2,10 @@ import {
   AuthError, BrowserCacheLocation, InteractionRequiredAuthError, PublicClientApplication,
   type AccountInfo, type AuthenticationResult,
 } from '@azure/msal-browser';
-import { InventoryError, requireDirectoryToken, requireTenantAdminToken } from '@rayfin-app/shared';
+import {
+  DIRECTORY_READ_PERMISSIONS, InventoryError, directoryTokenScopes, requireDirectoryToken, requireTenantAdminToken,
+  type DirectoryKind,
+} from '@rayfin-app/shared';
 import { AdminConfigError, readAdminConfig, type AdminConfig } from './admin-config';
 
 export interface AdminSession {
@@ -11,7 +14,8 @@ export interface AdminSession {
 }
 
 export class AdminAuthError extends Error {
-  constructor(readonly code: string, message: string) {
+  /** `detail` is a safe diagnostic code, such as the Microsoft Entra error AADSTS65001. */
+  constructor(readonly code: string, message: string, readonly detail?: string) {
     super(message);
     this.name = 'AdminAuthError';
   }
@@ -20,8 +24,14 @@ export class AdminAuthError extends Error {
 export const ADMIN_SCOPE = 'https://api.fabric.microsoft.com/Tenant.Read.All';
 /** The same consented Tenant.Read.All permission, with the audience of the Power BI admin scanner API. */
 export const POWER_BI_ADMIN_SCOPE = 'https://analysis.windows.net/powerbi/api/Tenant.Read.All';
-/** Whichever delegated Microsoft Graph permissions an administrator has granted this app. */
-export const DIRECTORY_SCOPE = 'https://graph.microsoft.com/.default';
+const GRAPH_RESOURCE = 'https://graph.microsoft.com';
+/** Every delegated Microsoft Graph permission granted to this app; used when a kind's own permission isn't granted. */
+export const DIRECTORY_SCOPE = `${GRAPH_RESOURCE}/.default`;
+
+/** The least-privileged delegated Microsoft Graph permission that reads names of this kind of principal. */
+export function directoryScope(kind: DirectoryKind): string {
+  return `${GRAPH_RESOURCE}/${DIRECTORY_READ_PERMISSIONS[kind][0]}`;
+}
 let client: Promise<PublicClientApplication> | undefined;
 let account: AccountInfo | null = null;
 let generation = 0;
@@ -140,30 +150,77 @@ export async function getPowerBiAdminAccessToken(): Promise<string> {
   }
 }
 
-function directoryFailure(error: unknown): AdminAuthError {
+const KIND_NAMES: Record<DirectoryKind, string> = { user: 'user', group: 'group', servicePrincipal: 'service principal' };
+/** Microsoft Entra errors meaning a permission has no consent: not consented, consent declined, admin consent required. */
+const CONSENT_ERRORS = new Set(['65001', '65004', '90094']);
+
+/** The Microsoft Entra error number, such as 65001 for AADSTS65001, when the server returned one. */
+function entraErrorNumber(error: AuthError): string | undefined {
+  const errorNo: unknown = (error as AuthError & { errorNo?: unknown }).errorNo;
+  if ((typeof errorNo === 'string' && /^\d+$/.test(errorNo)) || (typeof errorNo === 'number' && Number.isInteger(errorNo))) {
+    return String(errorNo);
+  }
+  return /AADSTS(\d+)/.exec(error.errorMessage ?? '')?.[1];
+}
+
+function consentMissing(error: unknown): boolean {
+  if (!(error instanceof AuthError)) return false;
+  const number = entraErrorNumber(error);
+  return (number !== undefined && CONSENT_ERRORS.has(number)) ||
+    error.subError === 'consent_required' || error.errorCode === 'consent_required';
+}
+
+/** A diagnostic code that is safe to show: the AADSTS error, else the MSAL error code. */
+function errorCodeOf(error: unknown): string {
+  if (!(error instanceof AuthError)) return 'unknown_error';
+  const number = entraErrorNumber(error);
+  if (number) return `AADSTS${number}`;
+  return /^[a-z0-9_]+$/i.test(error.errorCode) ? error.errorCode : 'unknown_error';
+}
+
+function directoryFailure(error: unknown, kind: DirectoryKind): AdminAuthError {
   if (error instanceof AdminAuthError || error instanceof AdminConfigError || error instanceof InventoryError) {
     return authFailure(error);
   }
-  const code = error instanceof AuthError && /^[a-z0-9_]+$/i.test(error.errorCode) ? error.errorCode : 'unknown_error';
+  const code = errorCodeOf(error);
   return new AdminAuthError('DirectoryAccessUnavailable',
-    `This app has no usable Microsoft Graph access for owner names yet (${code}).`);
+    `Microsoft Graph did not issue a token for ${KIND_NAMES[kind]} names (${code}).`, code);
+}
+
+async function directoryToken(scope: string, forceRefresh: boolean): Promise<string> {
+  const { result, config } = await acquireSilently(scope, forceRefresh);
+  if (!result.account || result.account.tenantId.toLowerCase() !== config.tenantId) {
+    throw new AdminAuthError('WrongTenant', 'Connect an administrator account in the configured tenant.');
+  }
+  return requireDirectoryToken(result.accessToken, config.tenantId);
 }
 
 /**
- * A Microsoft Graph token for owner-name lookups. It never opens a sign-in popup: without Graph
- * consent, names stay unavailable and the inventory is unaffected. `forceRefresh` bypasses a cached
- * token so newly granted permissions take effect.
+ * A Microsoft Graph token that can read the names of one kind of principal, so users, groups and
+ * service principals are looked up independently. It asks for the kind's least-privileged permission
+ * and, when that has no consent, accepts a broader permission an administrator granted instead.
+ * It never opens a sign-in window; `forceRefresh` bypasses cached tokens so newly granted permissions apply.
+ * Throws AdminAuthError `DirectoryPermissionNotGranted` when no permission that reads this kind has consent.
  */
-export async function getDirectoryAccessToken(forceRefresh = false): Promise<string> {
+export async function getDirectoryAccessToken(kind: DirectoryKind, forceRefresh = false): Promise<string> {
+  const permissions = DIRECTORY_READ_PERMISSIONS[kind];
+  let consentError: unknown;
   try {
-    const { result, config } = await acquireSilently(DIRECTORY_SCOPE, forceRefresh);
-    if (!result.account || result.account.tenantId.toLowerCase() !== config.tenantId) {
-      throw new AdminAuthError('WrongTenant', 'Connect an administrator account in the configured tenant.');
-    }
-    return requireDirectoryToken(result.accessToken, config.tenantId);
+    return await directoryToken(directoryScope(kind), forceRefresh);
   } catch (error) {
-    throw directoryFailure(error);
+    if (!consentMissing(error)) throw directoryFailure(error, kind);
+    consentError = error;
   }
+  try {
+    const token = await directoryToken(DIRECTORY_SCOPE, forceRefresh);
+    const granted = new Set(directoryTokenScopes(token).map((scope) => scope.toLowerCase()));
+    if (permissions.some((permission) => granted.has(permission.toLowerCase()))) return token;
+  } catch (error) {
+    if (!consentMissing(error)) throw directoryFailure(error, kind);
+  }
+  const code = errorCodeOf(consentError);
+  throw new AdminAuthError('DirectoryPermissionNotGranted',
+    `The delegated Microsoft Graph permission ${permissions[0]} has not been granted to this app with consent (${code}).`, code);
 }
 
 export async function disconnectAdmin(): Promise<void> {

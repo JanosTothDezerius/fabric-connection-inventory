@@ -9,11 +9,30 @@ export const MAX_DIRECTORY_BATCH = 20;
 /** Graph normally sends Retry-After with throttling; this is the wait when it does not. */
 const DEFAULT_GRAPH_RETRY_MS = 10_000;
 const EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
-// Only basic profile properties are requested, so the least-privileged permission for each type suffices.
-const PRINCIPAL_PATHS: Record<string, string> = {
+
+/** The kinds of directory object that can own connections and that Microsoft Graph can look up. */
+export type DirectoryKind = 'user' | 'group' | 'servicePrincipal';
+export const DIRECTORY_KINDS: readonly DirectoryKind[] = ['user', 'group', 'servicePrincipal'];
+
+/**
+ * Delegated Microsoft Graph permissions that can read each kind's basic properties. The first is the
+ * least-privileged one the app asks for; the others are broader permissions that also work when an
+ * administrator granted one of them instead.
+ */
+export const DIRECTORY_READ_PERMISSIONS: Readonly<Record<DirectoryKind, readonly string[]>> = {
+  user: ['User.ReadBasic.All', 'User.Read.All', 'User.ReadWrite.All', 'Directory.Read.All', 'Directory.ReadWrite.All', 'Directory.AccessAsUser.All'],
+  group: [
+    'GroupMember.Read.All', 'Group.ReadBasic.All', 'Group.Read.All', 'Group.ReadWrite.All',
+    'Directory.Read.All', 'Directory.ReadWrite.All', 'Directory.AccessAsUser.All',
+  ],
+  servicePrincipal: ['Application.Read.All', 'Application.ReadWrite.All', 'Directory.Read.All', 'Directory.ReadWrite.All', 'Directory.AccessAsUser.All'],
+};
+
+// Only basic profile properties are requested, so the least-privileged permission for each kind suffices.
+const PRINCIPAL_PATHS: Record<DirectoryKind, string> = {
   user: '/users/{id}?$select=id,displayName,userPrincipalName,mail',
   group: '/groups/{id}?$select=id,displayName,mail',
-  serviceprincipal: '/servicePrincipals/{id}?$select=id,displayName,appId',
+  servicePrincipal: '/servicePrincipals/{id}?$select=id,displayName,appId',
 };
 
 export interface PrincipalReference {
@@ -26,7 +45,7 @@ export type DirectoryLookupResult =
   | { status: 'resolved'; displayName?: string; userPrincipalName?: string; mail?: string; appId?: string }
   /** The directory has no such object; it may have been deleted. */
   | { status: 'notFound' }
-  /** The app's Microsoft Graph permissions do not allow reading this principal type. */
+  /** The app's Microsoft Graph permissions do not allow reading this principal. */
   | { status: 'denied' }
   | { status: 'failed'; error: ApiFailure };
 
@@ -35,10 +54,32 @@ export interface PrincipalLookup {
   result: DirectoryLookupResult;
 }
 
+/** The directory kind of a Fabric principal type, or undefined when Microsoft Graph can't look it up. */
+export function directoryKind(type: unknown): DirectoryKind | undefined {
+  if (typeof type !== 'string') return undefined;
+  switch (type.toLowerCase()) {
+    case 'user': return 'user';
+    case 'group': return 'group';
+    case 'serviceprincipal': return 'servicePrincipal';
+    default: return undefined;
+  }
+}
+
 /** Whether Microsoft Graph can look up a principal of this type; other types are not directory objects. */
 export function isDirectoryPrincipal(principal: PrincipalReference): boolean {
-  return typeof principal.id === 'string' && UUID.test(principal.id) && typeof principal.type === 'string' &&
-    Object.hasOwn(PRINCIPAL_PATHS, principal.type.toLowerCase());
+  return typeof principal.id === 'string' && UUID.test(principal.id) && directoryKind(principal.type) !== undefined;
+}
+
+function claims(token: string): Record<string, unknown> {
+  let value: unknown;
+  try {
+    const encoded = (token.split('.')[1] ?? '').replace(/-/g, '+').replace(/_/g, '/');
+    const decoded = atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, '='));
+    value = JSON.parse(new TextDecoder().decode(Uint8Array.from(decoded, (character) => character.charCodeAt(0))));
+  } catch {
+    throw new InventoryError({ code: 'InvalidResourceToken', message: 'The Microsoft Graph token could not be inspected for the configured tenant guard.' });
+  }
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 /**
@@ -52,15 +93,7 @@ export function requireDirectoryToken(token: string, expectedTenantId: string): 
       message: 'A valid, non-zero expected tenant GUID is required before requesting a Microsoft Graph token.',
     });
   }
-  let claims: unknown;
-  try {
-    const encoded = (token.split('.')[1] ?? '').replace(/-/g, '+').replace(/_/g, '/');
-    const decoded = atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, '='));
-    claims = JSON.parse(new TextDecoder().decode(Uint8Array.from(decoded, (value) => value.charCodeAt(0))));
-  } catch {
-    throw new InventoryError({ code: 'InvalidResourceToken', message: 'The Microsoft Graph token could not be inspected for the configured tenant guard.' });
-  }
-  const metadata = claims && typeof claims === 'object' && !Array.isArray(claims) ? claims as Record<string, unknown> : {};
+  const metadata = claims(token);
   if (typeof metadata.tid !== 'string' || metadata.tid.toLowerCase() !== expectedTenantId.toLowerCase()) {
     throw new InventoryError({ code: 'WrongTenant', message: 'This app is restricted to its configured tenant. Connect a tenant administrator account in that directory.' });
   }
@@ -68,6 +101,12 @@ export function requireDirectoryToken(token: string, expectedTenantId: string): 
     throw new InventoryError({ code: 'DelegatedTokenRequired', message: 'This app requires a delegated administrator sign-in, not an application-only token.' });
   }
   return token;
+}
+
+/** The delegated permissions a Microsoft Graph token grants (its scp claim), such as User.ReadBasic.All. */
+export function directoryTokenScopes(token: string): string[] {
+  const scopes = claims(token).scp;
+  return typeof scopes === 'string' ? scopes.split(/\s+/).filter(Boolean) : [];
 }
 
 function optional(value: unknown): string | undefined {
@@ -87,7 +126,7 @@ export class DirectoryLookup extends PacedApiClient {
 
   protected override failureMessage(status: number): string {
     return status === 401 ? 'Microsoft Graph rejected the access token. Reconnect the admin account and retry.' :
-      status === 403 ? 'Microsoft Graph denied the directory lookup. Grant the app delegated Microsoft Graph permissions to read users and groups.' :
+      status === 403 ? 'Microsoft Graph denied the directory lookup. Grant the app delegated Microsoft Graph permissions to read users, groups and service principals.' :
       status === 503 ? 'Microsoft Graph remained unavailable after bounded retries.' :
       `Microsoft Graph returned HTTP ${status}. Retry the name lookup.`;
   }
@@ -105,7 +144,7 @@ export class DirectoryLookup extends PacedApiClient {
     const requests = principals.map((principal, index) => ({
       id: String(index),
       method: 'GET',
-      url: PRINCIPAL_PATHS[principal.type.toLowerCase()].replace('{id}', principal.id),
+      url: PRINCIPAL_PATHS[directoryKind(principal.type)!].replace('{id}', principal.id),
     }));
     const body = object(await this.send(new URL(GRAPH_BATCH_URL), 'POST', { requests }));
     if (!Array.isArray(body.responses)) invalidResponse();

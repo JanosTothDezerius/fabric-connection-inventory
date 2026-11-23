@@ -1,14 +1,8 @@
 import { AlertCircle, CheckCircle2, Hourglass, LoaderCircle, TriangleAlert } from 'lucide-react';
-import type { ApiFailure } from '@rayfin-app/shared';
+import { DIRECTORY_KINDS, DIRECTORY_READ_PERMISSIONS, type DirectoryKind } from '@rayfin-app/shared';
 
+import type { DirectoryAccess } from '@/services/principal-names';
 import type { UsageView } from './connection-table';
-
-/** The least-privileged delegated Microsoft Graph permission that reads each owner type's name. */
-const GRAPH_PERMISSIONS: Record<string, string> = {
-  user: 'User.ReadBasic.All',
-  group: 'GroupMember.Read.All',
-  serviceprincipal: 'Application.Read.All',
-};
 
 export function UsageStatus({ usage, onRetry }: { usage: UsageView; onRetry: () => void }) {
   const { snapshot, loading, cancelled } = usage;
@@ -67,29 +61,102 @@ export function UsageStatus({ usage, onRetry }: { usage: UsageView; onRetry: () 
 }
 
 /** Explains owner names that could not be looked up, and which permissions an administrator can grant. */
-export function OwnerNameStatus({ unavailable, types, onRetry }: {
-  /** Set when lookups are paused because no Microsoft Graph token is available. */
-  unavailable?: ApiFailure;
-  /** Principal types whose names are missing because of the problem being reported. */
-  types: readonly string[];
+const KIND_DETAILS: Record<DirectoryKind, { one: string; many: string; purpose: string }> = {
+  user: {
+    one: 'user',
+    many: 'users',
+    purpose: 'Reads the display name, user principal name and email address of users that own connections.',
+  },
+  group: {
+    one: 'security group',
+    many: 'security groups',
+    purpose: 'Reads the display name and email address of security groups that own connections.',
+  },
+  servicePrincipal: {
+    one: 'service principal',
+    many: 'service principals',
+    purpose: 'Reads the display name and application ID of service principals, such as app registrations, managed identities and workspace identities, that own connections.',
+  },
+};
+
+function joined(items: string[]): string {
+  return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+}
+
+function owners(kind: DirectoryKind, count: number): string {
+  return `${count.toLocaleString()} ${count === 1 ? KIND_DETAILS[kind].one : KIND_DETAILS[kind].many}`;
+}
+
+/**
+ * Lists, for each kind of owner that shows only IDs, the missing Microsoft Graph permission and its
+ * purpose, or why the name lookup failed. Kinds with access keep showing their names.
+ */
+export function OwnerNameStatus({ access, unnamed, onRetry }: {
+  access: Readonly<Partial<Record<DirectoryKind, DirectoryAccess>>>;
+  /** Distinct owners of each kind that show only their ID. */
+  unnamed: Readonly<Record<DirectoryKind, number>>;
   onRetry: () => void;
 }) {
-  if (!unavailable && types.length === 0) return null;
-  const kinds = [...new Set(types.map((type) => type.toLowerCase()))].filter((type) => Object.hasOwn(GRAPH_PERMISSIONS, type));
-  const permissions = (kinds.length > 0 ? kinds : ['user', 'group']).map((type) => GRAPH_PERMISSIONS[type]);
-  const nouns = kinds.map((type) => type === 'serviceprincipal' ? 'service principal' : type).join(', ');
+  const missing = DIRECTORY_KINDS.filter((kind) => access[kind]?.status === 'notGranted' && unnamed[kind] > 0);
+  const failed = DIRECTORY_KINDS.filter((kind) => access[kind]?.status === 'failed' && unnamed[kind] > 0);
+  if (missing.length === 0 && failed.length === 0) return null;
+  const shown = DIRECTORY_KINDS.filter((kind) => access[kind]?.status === 'granted');
+  const total = [...missing, ...failed].reduce((sum, kind) => sum + unnamed[kind], 0);
   return (
     <div className="inventory-notice inventory-warning" role="status">
       <TriangleAlert className="icon-size-300 shrink-0" aria-hidden="true" />
-      <div className="min-w-0 flex-1 space-y-100">
-        <p className="font-semibold">{unavailable ? 'Owner names unavailable' : 'Some owner names can’t be read'}</p>
-        <p className="text-muted-foreground">
-          {unavailable ? unavailable.message : `This app’s Microsoft Graph permissions don’t allow reading ${nouns} names.`}
-          {' '}Owner IDs are still shown. To show names, an administrator can grant the app registration the delegated
-          Microsoft Graph {permissions.length > 1 ? 'permissions' : 'permission'}{' '}
-          <span className="font-monospace">{permissions.join(', ')}</span> with admin consent, then retry.
-        </p>
-        {unavailable?.code && <p className="text-200">Error code: {unavailable.code}</p>}
+      <div className="min-w-0 flex-1 space-y-300">
+        <div className="space-y-100">
+          <p className="font-semibold">{shown.length > 0 ? 'Some owner names can’t be shown' : 'Owner names unavailable'}</p>
+          <p className="text-muted-foreground">
+            {total.toLocaleString()} {total === 1 ? 'owner shows' : 'owners show'} only an ID.
+            {shown.length > 0 && ` Names are shown for ${joined(shown.map((kind) => KIND_DETAILS[kind].many))}.`}
+          </p>
+        </div>
+        {missing.length > 0 && (
+          <div className="space-y-200">
+            <p>
+              {missing.length === 1 ?
+                'This delegated Microsoft Graph permission is missing from the app registration or has no admin consent yet:' :
+                'These delegated Microsoft Graph permissions are missing from the app registration or have no admin consent yet:'}
+            </p>
+            <ul className="space-y-200" aria-label="Missing Microsoft Graph permissions">
+              {missing.map((kind) => {
+                const state = access[kind] as Extract<DirectoryAccess, { status: 'notGranted' }>;
+                return (
+                  <li key={kind} className="inventory-permission">
+                    <p className="font-monospace font-semibold">{DIRECTORY_READ_PERMISSIONS[kind][0]}</p>
+                    <p className="text-muted-foreground">{KIND_DETAILS[kind].purpose}</p>
+                    <p className="text-200 text-muted-foreground">
+                      {owners(kind, unnamed[kind])} without a name · Error code: {state.code}
+                    </p>
+                  </li>
+                );
+              })}
+            </ul>
+            <p className="text-200 text-muted-foreground">
+              In Microsoft Entra ID, open App registrations, select this app, then API permissions. Add any missing
+              permission and have an administrator select Grant admin consent; each permission’s Status must show
+              Granted. Then select Retry name lookups.
+            </p>
+          </div>
+        )}
+        {failed.length > 0 && (
+          <ul className="space-y-200" aria-label="Failed name lookups">
+            {failed.map((kind) => {
+              const state = access[kind] as Extract<DirectoryAccess, { status: 'failed' }>;
+              return (
+                <li key={kind} className="inventory-permission">
+                  <p className="font-semibold">Names of {owners(kind, unnamed[kind])} couldn’t be looked up</p>
+                  <p className="text-muted-foreground">
+                    {state.error.message} Select Retry name lookups; if this continues, choose Connect again.
+                  </p>
+                  <p className="text-200 text-muted-foreground">Error code: {state.error.code}</p>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
       <button className="inventory-button" onClick={onRetry}>Retry name lookups</button>
     </div>

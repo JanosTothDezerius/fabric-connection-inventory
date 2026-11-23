@@ -13,12 +13,14 @@ connection inventory, or previous deployment records are included.
 
 - Tenant-wide connection inventory with independent owner-role pagination.
 - Search by name, ID, owner, connector type, authentication type, or endpoint.
-- Connector, authentication-type (for example Service Principal or OAuth2) and
-  owner-status filters, sorting, details, and 25-row display pages.
+- Multi-select filters for connector type, authentication type (for example
+  Service Principal or OAuth2), and workspace, each showing how many connections
+  match; sorting, details, and 25-row display pages.
 - All `Owner` and `PendingOwner` assignments, with pending ownership labeled.
-- Owner names: when Fabric returns only a principal ID, the user, group, or
-  service principal name is looked up in Microsoft Entra ID and shown next to
-  the ID (requires the Microsoft Graph permissions listed under
+- Owner names: when Fabric returns only a principal ID, the name is looked up in
+  Microsoft Entra ID and shown next to the ID. Users, security groups, and
+  service principals are looked up separately, so each type shows names as soon
+  as its Microsoft Graph permission is granted (see
   [API permissions](#api-permissions)).
 - Dependent workloads: each connection's details list the semantic models,
   dataflows, data pipelines, Copy jobs, lakehouses, and other items bound to
@@ -115,29 +117,35 @@ flow with PKCE.
 | API | Delegated permission | Required | Used for |
 |---|---|---|---|
 | Power BI Service | `Tenant.Read.All` | **Yes** | Listing connections and their owners (Fabric admin APIs) and finding dependent workloads (admin workspace scanner) |
-| Microsoft Graph | `User.ReadBasic.All` | For owner names | Names of users that own connections |
-| Microsoft Graph | `GroupMember.Read.All` | For owner names | Names of groups that own connections |
-| Microsoft Graph | `Application.Read.All` | For owner names, if service principals own connections | Names of service principals that own connections |
+| Microsoft Graph | `User.ReadBasic.All` | For user names | Reads the display name, user principal name, and email address of users that own connections |
+| Microsoft Graph | `GroupMember.Read.All` | For group names | Reads the display name and email address of security groups that own connections |
+| Microsoft Graph | `Application.Read.All` | For service principal names | Reads the display name and application ID of service principals, such as app registrations, managed identities, and workspace identities, that own connections |
 
-- **Every permission needs admin consent**, including `User.ReadBasic.All`,
-  which the portal lists as not requiring it. The app never shows a consent
-  prompt: it requests the scanner and Microsoft Graph tokens silently, so a
-  permission without admin consent counts as missing.
+- **Every permission needs admin consent**, including `User.ReadBasic.All`.
+  The portal's **Admin consent required** column shows **No** for that
+  permission, but that only means users could consent for themselves. The app
+  never shows a consent prompt, so without admin consent the permission isn't
+  granted. Check the **Status** column instead: it must show
+  **Granted for [your tenant]**.
 - Add only delegated permissions; the app never uses application permissions.
-  Don't substitute broader permissions such as `Directory.Read.All`: the app's
-  Microsoft Graph token carries every Graph permission granted to this
-  registration.
-- Without a Graph permission, owners of that type show only their ID and a
-  notice names the missing permission. The inventory and dependent workloads
-  still work.
+  Prefer these least-privileged permissions to broader ones such as
+  `Directory.Read.All`: every Microsoft Graph token the app receives carries all
+  Graph permissions granted to this registration. If an administrator already
+  granted a broader permission, the app uses it.
+- Users, security groups, and service principals are looked up separately.
+  Without one type's permission, only owners of that type show IDs, and a notice
+  lists each missing permission with its purpose. Names of the other types, the
+  inventory, and dependent workloads still work.
 - One `Tenant.Read.All` grant covers both tokens the app requests from the Power
   BI Service API: `https://api.fabric.microsoft.com/Tenant.Read.All` at sign-in,
   for connections and owners, and
   `https://analysis.windows.net/powerbi/api/Tenant.Read.All` afterwards, for the
   workspace scanner. Sign-in also requests the standard OpenID Connect sign-in
   and renewal scopes, which need no entry in the table. For owner names the app
-  requests `https://graph.microsoft.com/.default`. Requests after sign-in are
-  silent and never open a sign-in window.
+  requests each Graph permission separately, such as
+  `https://graph.microsoft.com/User.ReadBasic.All`, and checks
+  `https://graph.microsoft.com/.default` for a broader permission granted
+  instead. Requests after sign-in are silent and never open a sign-in window.
 
 Consent doesn't make anyone an administrator. Fabric checks on each request that
 the signed-in account is a Fabric administrator, and Microsoft Graph returns only
@@ -190,7 +198,7 @@ A fully configured app shows:
 2. **Dependent workloads scanned**. Expand a connection to see the items that
    use it under **Dependent workloads**.
 3. Owner names above their IDs, with no **Owner names unavailable** or **Some
-   owner names can't be read** notice.
+   owner names can't be shown** notice.
 
 #### Troubleshooting permissions
 
@@ -198,15 +206,17 @@ A fully configured app shows:
 |---|---|---|
 | Microsoft sign-in asks for consent or admin approval, or **Admin sign-in did not grant Tenant.Read.All** | Power BI `Tenant.Read.All` is missing or has no admin consent | Add it, grant admin consent (step 2), then choose **Connect admin account** again |
 | **Access denied. Your signed-in account must be a Fabric administrator…**, or **Dependent workloads could not be determined** with error code `PowerBiHttp403` | The account isn't a Fabric administrator, or `Tenant.Read.All` has no admin consent | Choose **Connect again** with a Fabric administrator, or grant the consent |
-| **Owner names unavailable** (error code `DirectoryAccessUnavailable`) | No Microsoft Graph permission has admin consent | Add the Graph permissions, grant admin consent, then select **Retry name lookups** |
-| **Some owner names can't be read** | The Graph permission named in the notice is missing or has no admin consent | Add it, grant admin consent, then select **Retry name lookups** |
+| **Owner names unavailable** or **Some owner names can't be shown**, listing permissions with error code `AADSTS65001` | Each listed Microsoft Graph permission is missing from the app registration or has no admin consent. **Admin consent required: No** in the portal doesn't mean granted | Add the listed permissions, have an administrator select **Grant admin consent**, check that each **Status** shows **Granted**, then select **Retry name lookups** |
+| A listed permission with error code `GraphHttp403` | Microsoft Graph refused to read that type with the permissions granted | Grant the listed permission, then select **Retry name lookups** |
+| **Names of … couldn't be looked up**, with an error code such as `AADSTS50076` | Microsoft Graph didn't issue a token for that type, for example because the session needs multifactor authentication again | Select **Retry name lookups**; if it continues, choose **Connect again** |
 | An owner marked **Not found in Microsoft Entra ID** | The user, group, or service principal no longer exists | Nothing to grant; its ID stays visible |
+| An owner marked **Name not readable with this app's permissions** | Microsoft Graph refused to read that one principal | Select **Retry name lookups** |
 | An owner marked **Name lookup failed** | A temporary Microsoft Graph error | **Refresh inventory** looks the name up again |
 | Only in the deployed app: **Dependent workloads could not be determined** with error code `NetworkError`, or owners marked **Name lookup failed** | The host's Content-Security-Policy, if it sets one, blocks these APIs | Allow `https://api.powerbi.com` and `https://graph.microsoft.com` in its `connect-src` |
 
-**Retry name lookups** requests a fresh Microsoft Graph token, so newly granted
-permissions apply without signing in again. If names still don't appear, choose
-**Connect again**.
+**Retry name lookups** and **Refresh inventory** request fresh Microsoft Graph
+tokens, so newly granted permissions apply without signing in again. If names
+still don't appear, choose **Connect again**.
 
 ### Updating an existing deployment
 
@@ -291,13 +301,22 @@ snapshot; connections may change during enumeration.
   label instead of a server URL.
 - The authentication type is `credentialDetails.credentialType`. Connections
   without one can be selected with the **Not provided** filter option.
+- Values selected within one filter match any of them; different filters must
+  all match. Clearing a filter's selection stops it from filtering.
+- The **Workspace** filter lists the workspaces that contain a dependent
+  workload of at least one loaded connection. It shows the connections with a
+  dependent workload in any selected workspace, so a connection used in several
+  workspaces appears under each of them. Its results grow while the workspace
+  scan runs and cover only what the scanner reports (see below).
 - Fabric's role-assignment API often returns only the principal ID and type. The
-  app then looks up users, groups, and service principals by ID in Microsoft
-  Entra ID and shows the name next to the ID; names are never guessed. Other
-  principal types, such as service principal profiles, keep showing their ID. A
-  principal that no longer exists is marked "Not found in Microsoft Entra ID".
-  Names Fabric does return are used as-is. If the app's Microsoft Graph
-  permissions are missing, a notice names the permission to grant (see
+  app then looks up users, security groups, and service principals by ID in
+  Microsoft Entra ID, each type with its own Microsoft Graph permission, and
+  shows the name next to the ID; names are never guessed. A type whose
+  permission isn't granted keeps showing IDs while the other types show names.
+  Other principal types, such as service principal profiles, keep showing their
+  ID. A principal that no longer exists is marked "Not found in Microsoft Entra
+  ID". Names Fabric does return are used as-is. A notice lists each missing
+  permission with its purpose and the number of owners without a name (see
   [Troubleshooting permissions](#troubleshooting-permissions)).
 - Dependent workloads come from the Fabric admin metadata scanner, which scans
   every workspace (including personal and inactive ones) in batches of 100. An
