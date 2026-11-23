@@ -16,8 +16,8 @@ connection inventory, or previous deployment records are included.
 - All `Owner` and `PendingOwner` assignments, with pending ownership labeled.
 - Clear distinction between empty owner results, failed lookups, and unread rows.
 - Refresh, cancellation, responsive layout, and light/dark themes.
-- Bounded requests and retries; no automatic retry when CORS hides a throttled
-  response's `Retry-After` header.
+- Paced requests that pause automatically while Fabric throttles, and owner
+  lookups that resume without reloading the connection list.
 
 The app only calls:
 
@@ -122,8 +122,10 @@ URL also works. Confirm that the live inventory and owner lookups complete.
 ### Optional local development
 
 For administrator sign-in locally, explicitly register
-`http://localhost:5173/admin-auth.html` as an additional SPA redirect URI and use
-`http://localhost:5173` as the configured origin in your local `.env`.
+`http://localhost:5173/admin-auth.html` as an additional SPA redirect URI and set
+`VITE_ADMIN_HOSTED_ORIGIN='http://localhost:5173'` in
+`packages/frontend/.env.development.local`. Vite reads that file only for the
+development server, so production builds keep the hosted origin from `.env`.
 HTTP is accepted only for loopback development origins.
 
 ```sh
@@ -131,9 +133,16 @@ npm run dev -- --workspace-id <your-workspace-id>
 ```
 
 This starts the official Rayfin development flow, which can create or configure
-the backend in the explicit workspace. Review its target before approving a
-first-time create. Restore the production origin and redeploy before distributing
-the hosted application.
+the backend in the explicit workspace, and applies the local `rayfin/rayfin.yml`
+services to it. Review its target before approving a first-time create.
+
+When the app is already deployed and `packages/frontend/.env.local` points at
+that deployment, you can instead run only the local frontend against it, without
+changing the backend. It signs in with your Rayfin CLI session (`npx rayfin login`):
+
+```sh
+npm run -w @rayfin-app/frontend dev -- --port 5173 --strictPort
+```
 
 ## Authentication and data boundaries
 
@@ -180,9 +189,18 @@ snapshot; connections may change during enumeration.
 - Missing display names and metadata are marked explicitly.
 - Partial results remain visibly incomplete. Unread or failed owner lookups never
   appear as successful empty results.
-- Rapid repeated refreshes can trigger Fabric limits. If the browser cannot read
-  `Retry-After`, the app stops further batches and asks you to wait rather than
-  guessing a delay.
+- Requests are paced to avoid bursts. When Fabric throttles a request (HTTP 429)
+  or is briefly unavailable (HTTP 503), the app pauses and continues on its own at
+  the time Fabric gives: the `Retry-After` header when the browser can read it,
+  otherwise the "blocked until" time in the response body, otherwise one
+  60-second quota window. After throttling, it slows down for the rest of the
+  run. If throttling persists through three pauses without progress (backing off
+  exponentially), or Fabric asks for a wait longer than 10 minutes, the run stops
+  and shows when to try again.
+- Completed owner results are kept when a run stops or is cancelled after the
+  connection list is complete. **Resume owner lookups** (or **Retry failed owner
+  lookups**) requests only unresolved or failed owners, without listing
+  connections again; **Refresh inventory** starts over.
 
 ## Project layout and checks
 

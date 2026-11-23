@@ -101,4 +101,41 @@ describe('useInventory request lifecycle', () => {
     expect(result.current.snapshot.error?.message).toContain('Refresh to try again');
     expect(result.current.snapshot.error?.message).not.toContain('internal provider');
   });
+
+  it('resumes from the current snapshot and keeps its rows while owner lookups continue', async () => {
+    const first = deferred();
+    const second = deferred();
+    const options: LoadInventoryOptions[] = [];
+    mockLoad
+      .mockImplementationOnce((value) => { options.push(value); return first.promise; })
+      .mockImplementationOnce((value) => { options.push(value); return second.promise; });
+    const { result } = renderHook(useInventory);
+    expect(options[0].resumeFrom).toBeUndefined();
+    const stopped = syntheticSnapshot([
+      syntheticConnection({ id: 'kept' }),
+      syntheticConnection({ id: 'unfinished', ownerStatus: 'pending' }),
+    ], { phase: 'error', updatedAt: null, error: { code: 'FabricHttp429', message: 'Synthetic throttling', status: 429 } });
+    await act(async () => first.resolve(stopped));
+
+    act(() => result.current.resume());
+    expect(options).toHaveLength(2);
+    expect(options[1].resumeFrom).toBe(stopped);
+    expect(result.current.loading).toBe(true);
+    expect(result.current.snapshot.connections).toEqual(stopped.connections);
+    const finished = syntheticSnapshot([syntheticConnection({ id: 'kept' }), syntheticConnection({ id: 'unfinished' })]);
+    await act(async () => second.resolve(finished));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.snapshot).toEqual(finished);
+  });
+
+  it('does not resume an incomplete connection list', async () => {
+    mockLoad.mockResolvedValueOnce(syntheticSnapshot([syntheticConnection({ ownerStatus: 'pending' })], {
+      phase: 'error', inventoryComplete: false, updatedAt: null,
+    }));
+    const { result } = renderHook(useInventory);
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.resume());
+    expect(mockLoad).toHaveBeenCalledTimes(1);
+    expect(result.current.loading).toBe(false);
+  });
 });

@@ -170,7 +170,7 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
   onDisconnect: () => void;
   onReconnect: () => void;
 }) {
-  const { snapshot, loading, cancelled, refresh, cancel } = useInventory();
+  const { snapshot, loading, cancelled, refresh, resume, cancel } = useInventory();
   const labels = getInventoryLabels();
   const [filters, setFilters] = useState<InventoryFilters>(emptyFilters);
   const [sort, setSort] = useState<InventorySort>({ column: 'displayName', direction: 'asc' });
@@ -303,7 +303,13 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
           </div>
         </section>
 
-        <InventoryStatus snapshot={snapshot} loading={loading} cancelled={cancelled} onRetry={refreshInventory} />
+        <InventoryStatus
+          snapshot={snapshot}
+          loading={loading}
+          cancelled={cancelled}
+          onRetry={refreshInventory}
+          onResume={resume}
+        />
 
         <section className="inventory-panel" aria-labelledby="connections-title">
           <div className="space-y-500 border-b p-500 sm:p-600">

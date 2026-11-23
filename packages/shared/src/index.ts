@@ -6,13 +6,17 @@
  */
 export type UniversalAppSchema = Record<string, never>;
 
-export { FabricInventory, InventoryError, requireTenantAdminToken, safeResult } from './fabric-api.js';
+export {
+  DEFAULT_THROTTLE_WAIT_MS, FabricInventory, InventoryError, delay, requireTenantAdminToken, safeResult,
+} from './fabric-api.js';
 
 export interface ApiFailure {
   code: string;
   message: string;
   status?: number;
   requestId?: string;
+  /** Epoch milliseconds before which Fabric should not receive a retry. */
+  retryAt?: number;
 }
 
 export type ApiResult<T> =
@@ -66,9 +70,16 @@ export interface InventorySnapshot {
   phase: 'connections' | 'owners' | 'done' | 'error';
   updatedAt: string | null;
   error?: ApiFailure;
+  /** Set while requests are paused for Fabric throttling: epoch milliseconds when they resume. */
+  pausedUntil?: number;
 }
 
 export interface LoadInventoryOptions {
   signal: AbortSignal;
   onProgress: (snapshot: InventorySnapshot) => void;
+  /**
+   * A snapshot with a complete connection list. Its connections are kept and only
+   * owner lookups that have not succeeded are requested again.
+   */
+  resumeFrom?: InventorySnapshot;
 }
