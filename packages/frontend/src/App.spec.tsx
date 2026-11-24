@@ -1,22 +1,32 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { InventorySnapshot, LoadInventoryOptions } from '@rayfin-app/shared';
+import { DirectoryLookup, type InventorySnapshot, type LoadInventoryOptions } from '@rayfin-app/shared';
 
 import App from '@/App';
 import { ThemeContext } from '@/hooks/theme.context';
 import { useAppTheme } from '@/hooks/use-theme';
-import { getAdminSession } from '@/services/admin-auth';
+import { AdminAuthError, getAdminSession, getDirectoryAccessToken } from '@/services/admin-auth';
+import { emptyUsage, loadConnectionUsage, type LoadUsageOptions } from '@/services/connection-usage';
 import { loadInventory } from '@/services/inventory';
 import { syntheticConnection, syntheticSnapshot } from '@/test/inventory-fixtures';
 import { configureSyntheticAdminEnvironment, syntheticTenantId } from '@/test/admin-config-fixtures';
 
 vi.mock('@/services/inventory', () => ({ loadInventory: vi.fn() }));
+vi.mock('@/services/connection-usage', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/services/connection-usage')>(),
+  loadConnectionUsage: vi.fn(),
+}));
 vi.mock('@/services/admin-auth', () => ({
   getAdminSession: vi.fn(),
   signInAdmin: vi.fn(),
   disconnectAdmin: vi.fn(),
+  getDirectoryAccessToken: vi.fn(),
+  AdminAuthError: class extends Error {
+    constructor(readonly code: string, message: string, readonly detail?: string) { super(message); }
+  },
 }));
 const mockLoad = vi.mocked(loadInventory);
+const mockUsage = vi.mocked(loadConnectionUsage);
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -24,6 +34,7 @@ beforeEach(() => {
   vi.mocked(getAdminSession).mockReturnValue({
     username: 'synthetic-admin@example.test', tenantId: syntheticTenantId,
   });
+  mockUsage.mockReturnValue(new Promise(() => {}));
 });
 afterEach(() => {
   cleanup();
@@ -84,7 +95,8 @@ describe('Connection inventory', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
     expect(screen.getByText('Synthetic connection 28')).toBeVisible();
     expect(within(screen.getByRole('table')).getAllByRole('row')).toHaveLength(4);
-    fireEvent.change(screen.getByRole('combobox', { name: 'Connector type' }), { target: { value: 'SyntheticWeb' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Connector type All connector types' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'SyntheticWeb' }));
     expect(screen.getByText('Page 1 of 1')).toBeVisible();
     expect(screen.getByText('Synthetic connection 28')).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
@@ -93,20 +105,6 @@ describe('Connection inventory', () => {
     expect(within(screen.getByRole('table')).getAllByRole('row')[1]).toHaveTextContent('Synthetic connection 28');
     fireEvent.change(screen.getByRole('searchbox', { name: 'Search inventory' }), { target: { value: 'nothing matches' } });
     expect(screen.getByText('No matching connections')).toBeVisible();
-  });
-
-  it('excludes pending and failed lookups from the no-owner filter', async () => {
-    mockLoad.mockResolvedValue(syntheticSnapshot([
-      syntheticConnection({ id: 'pending', displayName: 'Synthetic pending', ownerStatus: 'pending' }),
-      syntheticConnection({ id: 'failure', displayName: 'Synthetic failure', ownerStatus: 'error' }),
-      syntheticConnection({ id: 'empty', displayName: 'Synthetic confirmed empty' }),
-    ]));
-    render(<App />);
-    await screen.findByText('Synthetic confirmed empty');
-    fireEvent.change(screen.getByRole('combobox', { name: 'Owner resolution' }), { target: { value: 'none' } });
-    expect(screen.getByText('Synthetic confirmed empty')).toBeVisible();
-    expect(screen.queryByText('Synthetic failure')).not.toBeInTheDocument();
-    expect(screen.queryByText('Synthetic pending')).not.toBeInTheDocument();
   });
 
   it('shows partial-list failure and retry without labeling the inventory complete', async () => {
@@ -207,6 +205,160 @@ describe('Connection inventory', () => {
     render(<App />);
     expect(await screen.findByRole('alert')).toHaveTextContent('Refresh to try again');
     expect(screen.queryByText('Loading connections…')).not.toBeInTheDocument();
+  });
+
+  it('filters by several authentication types at once and shows each connection’s type', async () => {
+    mockLoad.mockResolvedValue(syntheticSnapshot([
+      syntheticConnection({ id: 'principal', displayName: 'Synthetic principal', credentialType: 'ServicePrincipal' }),
+      syntheticConnection({ id: 'oauth', displayName: 'Synthetic oauth', credentialType: 'OAuth2' }),
+      syntheticConnection({ id: 'key', displayName: 'Synthetic key', credentialType: 'Key' }),
+    ]));
+    render(<App />);
+    await screen.findByText('Synthetic principal');
+    fireEvent.click(screen.getByRole('button', { name: 'Authentication type All authentication types' }));
+    const options = within(screen.getByRole('group', { name: 'Authentication type' }));
+    fireEvent.click(options.getByRole('checkbox', { name: 'Service Principal', description: '1 connection' }));
+    fireEvent.click(options.getByRole('checkbox', { name: 'OAuth2' }));
+
+    expect(screen.getByRole('button', { name: 'Authentication type 2 selected' })).toBeVisible();
+    expect(screen.getByText('Synthetic principal')).toBeVisible();
+    expect(screen.getByText('Synthetic oauth')).toBeVisible();
+    expect(screen.queryByText('Synthetic key')).not.toBeInTheDocument();
+    expect(within(screen.getByRole('table')).getByText('Auth: Service Principal')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(screen.getByText('Synthetic key')).toBeVisible();
+  });
+
+  it('filters by workspaces, showing connections with a dependent workload in any selected workspace', async () => {
+    const item = (workspaceId: string, workspaceName: string) => ({
+      id: `item-${workspaceId}`, name: 'Synthetic model', type: 'Semantic model', workspaceId, workspaceName,
+    });
+    mockLoad.mockResolvedValue(syntheticSnapshot([
+      syntheticConnection({ id: 'shared', displayName: 'Synthetic shared' }),
+      syntheticConnection({ id: 'finance', displayName: 'Synthetic finance' }),
+      syntheticConnection({ id: 'unused', displayName: 'Synthetic unused' }),
+    ]));
+    mockUsage.mockResolvedValue({
+      ...emptyUsage(), phase: 'done', workspaceCount: 2, scannedWorkspaces: 2, updatedAt: '2026-01-02T03:04:05Z',
+      itemsByConnection: new Map([
+        ['shared', [item('workspace-finance', 'Finance'), item('workspace-sales', 'Sales')]],
+        ['finance', [item('workspace-finance', 'Finance')]],
+      ]),
+    });
+    render(<App />);
+    expect(await screen.findByText('Dependent workloads scanned')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Workspace All workspaces' }));
+    const workspaces = within(screen.getByRole('group', { name: 'Workspace' }));
+    fireEvent.click(workspaces.getByRole('checkbox', { name: 'Sales', description: '1 connection' }));
+    expect(screen.getByText('Synthetic shared')).toBeVisible();
+    expect(screen.queryByText('Synthetic finance')).not.toBeInTheDocument();
+
+    fireEvent.click(workspaces.getByRole('checkbox', { name: 'Finance', description: '2 connections' }));
+    expect(screen.getByText('Synthetic shared')).toBeVisible();
+    expect(screen.getByText('Synthetic finance')).toBeVisible();
+    expect(screen.queryByText('Synthetic unused')).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Workspace 2 selected' }), { key: 'Escape' });
+    expect(screen.queryByRole('group', { name: 'Workspace' })).not.toBeInTheDocument();
+  });
+
+  it('looks up user, group and service principal names separately and lists each missing permission', async () => {
+    const user = '11111111-1111-4111-8111-111111111111';
+    const group = '22222222-2222-4222-8222-222222222222';
+    const app = '33333333-3333-4333-8333-333333333333';
+    const names: Record<string, string> = { [user]: 'Synthetic Owner', [group]: 'Synthetic Group', [app]: 'Synthetic App' };
+    mockLoad.mockResolvedValue(syntheticSnapshot([syntheticConnection({
+      owners: [
+        { id: user, type: 'User', role: 'Owner' },
+        { id: group, type: 'Group', role: 'Owner' },
+        { id: app, type: 'ServicePrincipal', role: 'Owner' },
+      ],
+    })]));
+    const granted = new Set<string>();
+    vi.mocked(getDirectoryAccessToken).mockImplementation(async (kind) => {
+      if (granted.has(kind)) return `synthetic-${kind}-token`;
+      throw new AdminAuthError('DirectoryPermissionNotGranted', 'Synthetic permission not granted', 'AADSTS65001');
+    });
+    const lookup = vi.spyOn(DirectoryLookup.prototype, 'lookupPrincipals').mockImplementation(async (batch) =>
+      batch.map(({ id }) => ({ id, result: { status: 'resolved' as const, displayName: names[id] } })));
+    const permissions = () => within(screen.getByRole('list', { name: 'Missing Microsoft Graph permissions' })).getAllByRole('listitem');
+    render(<App />);
+    const table = within(await screen.findByRole('table'));
+
+    expect(await screen.findByText('3 owners show only an ID.')).toBeVisible();
+    expect(screen.getByText('Owner names unavailable')).toBeVisible();
+    expect(permissions()).toHaveLength(3);
+    expect(permissions()[0]).toHaveTextContent('User.ReadBasic.All');
+    expect(permissions()[0]).toHaveTextContent('Reads the display name, user principal name and email address of users that own connections.');
+    expect(permissions()[0]).toHaveTextContent('1 user without a name · Error code: AADSTS65001');
+    expect(permissions()[1]).toHaveTextContent('GroupMember.Read.All');
+    expect(permissions()[1]).toHaveTextContent('security groups that own connections');
+    expect(permissions()[2]).toHaveTextContent('Application.Read.All');
+    expect(permissions()[2]).toHaveTextContent('service principals, such as app registrations');
+    expect(table.getByText(user)).toBeVisible();
+    expect(lookup).not.toHaveBeenCalled();
+
+    granted.add('user');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry name lookups' }));
+    expect(await table.findByText('Synthetic Owner')).toBeVisible();
+    expect(await screen.findByText('2 owners show only an ID. Names are shown for users.')).toBeVisible();
+    expect(screen.getByText('Some owner names can’t be shown')).toBeVisible();
+    expect(permissions()).toHaveLength(2);
+    expect(permissions()[0]).toHaveTextContent('GroupMember.Read.All');
+    expect(getDirectoryAccessToken).toHaveBeenCalledWith('user', true);
+
+    granted.add('group').add('servicePrincipal');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry name lookups' }));
+    expect(await table.findByText('Synthetic Group')).toBeVisible();
+    expect(await table.findByText('Synthetic App')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Retry name lookups' })).not.toBeInTheDocument();
+    expect(lookup.mock.calls.map(([batch]) => batch)).toEqual([
+      [{ id: user, type: 'User' }], [{ id: group, type: 'Group' }], [{ id: app, type: 'ServicePrincipal' }],
+    ]);
+    lookup.mockRestore();
+  });
+
+  it('lists the dependent workloads of an expanded connection, or says it is not used', async () => {
+    mockLoad.mockResolvedValue(syntheticSnapshot([
+      syntheticConnection({ id: 'used', displayName: 'Synthetic used' }),
+      syntheticConnection({ id: 'unused', displayName: 'Synthetic unused' }),
+    ]));
+    mockUsage.mockResolvedValue({
+      ...emptyUsage(), phase: 'done', workspaceCount: 2, scannedWorkspaces: 2, updatedAt: '2026-01-02T03:04:05Z',
+      itemsByConnection: new Map([['used', [
+        { id: 'model', name: 'Synthetic sales model', type: 'Semantic model', workspaceId: 'workspace', workspaceName: 'Synthetic workspace' },
+        { id: 'flow', name: 'Synthetic flow', type: 'Dataflow', workspaceId: 'workspace', workspaceName: 'Synthetic workspace', misconfigured: true },
+      ]]]),
+    });
+    render(<App />);
+    expect(await screen.findByText('Dependent workloads scanned')).toBeVisible();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show details for Synthetic used' }));
+    const workloads = within(screen.getByRole('list', { name: 'Dependent workloads' }));
+    expect(workloads.getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      'DataflowSynthetic flowin Synthetic workspaceMisconfigured binding',
+      'Semantic modelSynthetic sales modelin Synthetic workspace',
+    ]);
+    fireEvent.click(screen.getByRole('button', { name: 'Show details for Synthetic unused' }));
+    expect(screen.getByText('Not used by any workload. No item in the 2 scanned workspaces is bound to this connection.')).toBeVisible();
+  });
+
+  it('cancels a running workspace scan without marking a finished inventory as cancelled', async () => {
+    let usageOptions!: LoadUsageOptions;
+    mockLoad.mockResolvedValue(syntheticSnapshot());
+    mockUsage.mockImplementation((options) => {
+      usageOptions = options;
+      return new Promise(() => {});
+    });
+    render(<App />);
+    expect(await screen.findByText('Inventory refreshed')).toBeVisible();
+    expect(screen.getByText('Scanning workspaces for dependent workloads')).toBeVisible();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Cancel$/ }));
+    expect(usageOptions.signal.aborted).toBe(true);
+    expect(screen.getByText('Workspace scan cancelled')).toBeVisible();
+    expect(screen.getByText('Inventory refreshed')).toBeVisible();
+    expect(screen.queryByText('Refresh cancelled')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Cancel$/ })).not.toBeInTheDocument();
   });
 
   it('uses the existing theme toggle and keeps data-theme and dark class coherent', async () => {

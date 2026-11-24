@@ -6,6 +6,7 @@ import App from '@/App';
 import {
   disconnectAdmin, getAdminSession, signInAdmin, type AdminSession,
 } from '@/services/admin-auth';
+import { loadConnectionUsage } from '@/services/connection-usage';
 import { loadInventory } from '@/services/inventory';
 import { syntheticConnection, syntheticSnapshot } from '@/test/inventory-fixtures';
 import { configureSyntheticAdminEnvironment, syntheticTenantId } from '@/test/admin-config-fixtures';
@@ -16,11 +17,16 @@ vi.mock('@/services/admin-auth', () => ({
   disconnectAdmin: vi.fn(),
 }));
 vi.mock('@/services/inventory', () => ({ loadInventory: vi.fn() }));
+vi.mock('@/services/connection-usage', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/services/connection-usage')>(),
+  loadConnectionUsage: vi.fn(),
+}));
 
 const mockSession = vi.mocked(getAdminSession);
 const mockSignIn = vi.mocked(signInAdmin);
 const mockDisconnect = vi.mocked(disconnectAdmin);
 const mockLoad = vi.mocked(loadInventory);
+const mockUsage = vi.mocked(loadConnectionUsage);
 const syntheticAdmin: AdminSession = {
   username: 'synthetic-admin@example.test',
   tenantId: syntheticTenantId,
@@ -39,6 +45,7 @@ beforeEach(() => {
   mockSignIn.mockResolvedValue(syntheticAdmin);
   mockDisconnect.mockResolvedValue();
   mockLoad.mockResolvedValue(syntheticSnapshot());
+  mockUsage.mockReturnValue(new Promise(() => {}));
 });
 
 afterEach(() => {

@@ -14,17 +14,22 @@ import {
 import { ConnectionTable } from '@/components/inventory/connection-table';
 import { InventoryHeader } from '@/components/inventory/inventory-header';
 import { InventoryStatus } from '@/components/inventory/inventory-status';
+import { OwnerNameStatus, UsageStatus } from '@/components/inventory/lookup-status';
+import { MultiSelect } from '@/components/inventory/multi-select';
 import {
-  formatTimestamp, PAGE_SIZE, selectConnections, summarizeInventory,
-  type InventoryFilters, type InventorySort, type SortColumn,
+  connectorTypeOptions, credentialTypeOptions, formatTimestamp, PAGE_SIZE, selectConnections, summarizeInventory,
+  withDirectoryNames, workspaceOptions, type InventoryFilters, type InventorySort, type SortColumn,
 } from '@/components/inventory/inventory-model';
+import { useConnectionUsage } from '@/hooks/use-connection-usage';
 import { useInventory } from '@/hooks/use-inventory';
+import { usePrincipalNames } from '@/hooks/use-principal-names';
 import {
   disconnectAdmin, getAdminSession, signInAdmin, type AdminSession,
 } from '@/services/admin-auth';
 import { getAdminSetup, getInventoryLabels } from '@/services/admin-config';
+import { ownersShowingOnlyIds } from '@/services/principal-names';
 
-const emptyFilters: InventoryFilters = { search: '', connectorType: '', ownerStatus: 'all' };
+const emptyFilters: InventoryFilters = { search: '', connectorTypes: [], credentialTypes: [], workspaceIds: [] };
 
 function App() {
   const [session, setSession] = useState<AdminSession | null>(() => getAdminSession());
@@ -171,29 +176,44 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
   onReconnect: () => void;
 }) {
   const { snapshot, loading, cancelled, refresh, resume, cancel } = useInventory();
+  const usage = useConnectionUsage();
+  const names = usePrincipalNames(snapshot.connections);
   const labels = getInventoryLabels();
   const [filters, setFilters] = useState<InventoryFilters>(emptyFilters);
   const [sort, setSort] = useState<InventorySort>({ column: 'displayName', direction: 'asc' });
   const [page, setPage] = useState(1);
   const counts = useMemo(() => summarizeInventory(snapshot), [snapshot]);
+  const connections = useMemo(
+    () => withDirectoryNames(snapshot.connections, names.results),
+    [snapshot.connections, names.results]
+  );
   // Typing stays responsive on large tenants; the filtered list catches up a frame later.
   const search = useDeferredValue(filters.search);
+  const itemsByConnection = usage.snapshot.itemsByConnection;
   const rows = useMemo(
-    () => selectConnections(snapshot.connections, { ...filters, search }, sort),
-    [snapshot.connections, filters, search, sort]
+    () => selectConnections(connections, { ...filters, search }, sort, itemsByConnection),
+    [connections, filters, search, sort, itemsByConnection]
   );
-  const connectorTypes = useMemo(
-    () => [...new Set([
-      ...snapshot.connections.map((row) => row.connectorType).filter(Boolean),
-      ...(filters.connectorType ? [filters.connectorType] : []),
-    ])].sort((a, b) => a.localeCompare(b)),
-    [snapshot.connections, filters.connectorType]
+  const connectorOptions = useMemo(
+    () => connectorTypeOptions(snapshot.connections, filters.connectorTypes),
+    [snapshot.connections, filters.connectorTypes]
   );
+  const credentialOptions = useMemo(
+    () => credentialTypeOptions(snapshot.connections, filters.credentialTypes),
+    [snapshot.connections, filters.credentialTypes]
+  );
+  const workspaceFilterOptions = useMemo(
+    () => workspaceOptions(snapshot.connections, itemsByConnection, filters.workspaceIds),
+    [snapshot.connections, itemsByConnection, filters.workspaceIds]
+  );
+  const unnamedOwners = useMemo(() => ownersShowingOnlyIds(connections), [connections]);
+  const scanIncomplete = usage.loading || usage.cancelled || usage.snapshot.phase === 'error' || usage.snapshot.failedWorkspaces > 0;
   const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
   const firstRow = (currentPage - 1) * PAGE_SIZE;
   const visibleRows = rows.slice(firstRow, firstRow + PAGE_SIZE);
-  const hasFilters = Boolean(filters.search || filters.connectorType || filters.ownerStatus !== 'all');
+  const hasFilters = Boolean(filters.search || filters.connectorTypes.length > 0 || filters.credentialTypes.length > 0 ||
+    filters.workspaceIds.length > 0);
   const complete = snapshot.phase === 'done' && snapshot.inventoryComplete;
 
   function updateFilters(update: Partial<InventoryFilters>) {
@@ -212,6 +232,15 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
   function refreshInventory() {
     setPage(1);
     refresh();
+    usage.refresh();
+    // Names already found are kept; denied, failed or paused lookups are tried again.
+    names.retry();
+  }
+
+  function cancelLoading() {
+    // A finished inventory stays complete when only the workspace scan is still running.
+    if (loading) cancel();
+    usage.cancel();
   }
 
   let emptyTitle = 'No matching connections';
@@ -249,8 +278,8 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
           </div>
           <div className="space-y-200">
             <div className="flex flex-wrap items-center gap-200">
-              {loading && (
-                <button className="inventory-button" onClick={cancel}>
+              {(loading || usage.loading) && (
+                <button className="inventory-button" onClick={cancelLoading}>
                   <X className="icon-size-200" aria-hidden="true" /> Cancel
                 </button>
               )}
@@ -310,8 +339,10 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
           onRetry={refreshInventory}
           onResume={resume}
         />
+        <UsageStatus usage={usage} onRetry={usage.refresh} />
+        <OwnerNameStatus access={names.access} unnamed={unnamedOwners} onRetry={names.retry} />
 
-        <section className="inventory-panel" aria-labelledby="connections-title">
+        <section className="inventory-panel inventory-panel-open" aria-labelledby="connections-title">
           <div className="space-y-500 border-b p-500 sm:p-600">
             <div className="flex flex-wrap items-center justify-between gap-300">
               <h2 id="connections-title" className="text-500 leading-500 font-semibold">Connections</h2>
@@ -332,26 +363,32 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
                   />
                 </span>
               </label>
-              <label className="inventory-field">
-                <span>Connector type</span>
-                <select value={filters.connectorType} onChange={(event) => updateFilters({ connectorType: event.target.value })}>
-                  <option value="">All connector types</option>
-                  {connectorTypes.map((type) => <option key={type} value={type}>{type}</option>)}
-                </select>
-              </label>
-              <label className="inventory-field">
-                <span>Owner resolution</span>
-                <select
-                  value={filters.ownerStatus}
-                  onChange={(event) => updateFilters({ ownerStatus: event.target.value as InventoryFilters['ownerStatus'] })}
-                >
-                  <option value="all">All owner statuses</option>
-                  <option value="loaded">Resolved</option>
-                  <option value="pending">Not yet resolved</option>
-                  <option value="error">Lookup failed</option>
-                  <option value="none">Resolved · no owners returned</option>
-                </select>
-              </label>
+              <MultiSelect
+                label="Connector type"
+                allLabel="All connector types"
+                options={connectorOptions}
+                selected={filters.connectorTypes}
+                onChange={(connectorTypes) => updateFilters({ connectorTypes })}
+                emptyMessage="No connections loaded yet."
+              />
+              <MultiSelect
+                label="Authentication type"
+                allLabel="All authentication types"
+                options={credentialOptions}
+                selected={filters.credentialTypes}
+                onChange={(credentialTypes) => updateFilters({ credentialTypes })}
+                emptyMessage="No connections loaded yet."
+              />
+              <MultiSelect
+                label="Workspace"
+                allLabel="All workspaces"
+                options={workspaceFilterOptions}
+                selected={filters.workspaceIds}
+                onChange={(workspaceIds) => updateFilters({ workspaceIds })}
+                emptyMessage={usage.loading ? 'Scanning workspaces for dependent workloads…' :
+                  scanIncomplete ? 'The workspace scan didn’t finish. Retry it above.' :
+                    'No loaded connection has dependent workloads.'}
+              />
               <button
                 className="inventory-button"
                 disabled={!hasFilters}
@@ -360,12 +397,20 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
                 Clear filters
               </button>
             </div>
+            {filters.workspaceIds.length > 0 && scanIncomplete && (
+              <p className="text-200 text-muted-foreground" role="status">
+                The workspace filter uses the dependent workloads found so far.
+                {usage.loading ? ' More connections may match when the workspace scan finishes.' :
+                  ' The workspace scan didn’t cover every workspace, so some matching connections may be missing.'}
+              </p>
+            )}
           </div>
           <ConnectionTable
             rows={visibleRows}
             sort={sort}
             onSort={updateSort}
             loading={loading}
+            usage={usage}
             emptyTitle={emptyTitle}
             emptyDescription={emptyDescription}
           />
@@ -391,8 +436,9 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
         <footer className="flex items-start gap-200 pb-400 text-200 text-muted-foreground">
           <Info className="icon-size-200 shrink-0" aria-hidden="true" />
           <p>
-            Fabric may return only an owner’s principal ID and type, not a display name.
-            IDs are shown exactly as returned; names are not inferred. Pending owner assignments are labeled separately.
+            Fabric may return only an owner’s principal ID and type. Missing user, group and service principal names
+            are looked up in Microsoft Entra ID and shown next to the IDs; names are never guessed. Pending owner assignments are labeled separately.
+            Dependent workloads come from the Fabric admin workspace scanner and are read-only.
             Endpoints are displayed as text, not opened or tested. Summary counts include all loaded connections, regardless of filters.
             {' '}Disconnect clears only this app’s in-memory admin session, not your Microsoft sign-in in other apps.
           </p>

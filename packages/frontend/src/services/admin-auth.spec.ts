@@ -13,12 +13,23 @@ const msal = vi.hoisted(() => ({
 }));
 
 vi.mock('@azure/msal-browser', () => {
+  // Mirrors the MSAL 5 constructor parameters used by the app.
   class AuthError extends Error {
-    constructor(readonly errorCode: string) { super(errorCode); }
+    constructor(readonly errorCode: string, readonly correlationId = '', readonly errorMessage = '', readonly subError = '') {
+      super(errorCode);
+    }
+  }
+  class InteractionRequiredAuthError extends AuthError {
+    readonly errorNo?: string;
+    // MSAL 5 passes timestamp, trace ID and claims before the server error number.
+    constructor(errorCode: string, correlationId = '', errorMessage = '', subError = '', ...details: string[]) {
+      super(errorCode, correlationId, errorMessage, subError);
+      this.errorNo = details[3];
+    }
   }
   return {
     AuthError,
-    InteractionRequiredAuthError: class extends AuthError {},
+    InteractionRequiredAuthError,
     BrowserCacheLocation: { MemoryStorage: 'memoryStorage' },
     PublicClientApplication: class {
       constructor(config: unknown) { msal.configure(config); }
@@ -147,6 +158,78 @@ describe('configured single-tenant delegated authentication', () => {
     await auth.signInAdmin();
     msal.acquireTokenSilent.mockRejectedValue(new Error('synthetic-sensitive-error-payload'));
     await expect(auth.getAdminAccessToken()).rejects.not.toThrow('synthetic-sensitive-error-payload');
+    expect(msal.loginPopup).toHaveBeenCalledOnce();
+  });
+
+  it('acquires scanner and per-kind Graph tokens silently for the connected admin, never with a popup', async () => {
+    const auth = await import('./admin-auth');
+    await expect(auth.getDirectoryAccessToken('user')).rejects.toMatchObject({ code: 'AdminSignInRequired' });
+    await auth.signInAdmin();
+    expect(await auth.getPowerBiAdminAccessToken()).toBe(token());
+    expect(msal.acquireTokenSilent).toHaveBeenLastCalledWith({ account: identity, scopes: [auth.POWER_BI_ADMIN_SCOPE] });
+
+    const graphToken = token(tenant, 'User.ReadBasic.All GroupMember.Read.All Application.Read.All');
+    msal.acquireTokenSilent.mockResolvedValue({ account: identity, accessToken: graphToken });
+    expect(await auth.getDirectoryAccessToken('user', true)).toBe(graphToken);
+    expect(msal.acquireTokenSilent).toHaveBeenLastCalledWith({
+      account: identity, scopes: ['https://graph.microsoft.com/User.ReadBasic.All'], forceRefresh: true,
+    });
+    await auth.getDirectoryAccessToken('group');
+    expect(msal.acquireTokenSilent).toHaveBeenLastCalledWith({
+      account: identity, scopes: ['https://graph.microsoft.com/GroupMember.Read.All'],
+    });
+    await auth.getDirectoryAccessToken('servicePrincipal');
+    expect(msal.acquireTokenSilent).toHaveBeenLastCalledWith({
+      account: identity, scopes: ['https://graph.microsoft.com/Application.Read.All'],
+    });
+    expect(msal.loginPopup).toHaveBeenCalledOnce();
+  });
+
+  it('accepts a broader granted permission and reports a missing one with its Entra error code', async () => {
+    const { InteractionRequiredAuthError } = await import('@azure/msal-browser');
+    const consentRequired = () => new InteractionRequiredAuthError('invalid_grant', 'synthetic-correlation',
+      'AADSTS65001: The user or administrator has not consented. Trace ID: synthetic-trace', 'consent_required', '', '', '', '65001');
+    const auth = await import('./admin-auth');
+    await auth.signInAdmin();
+    const broader = token(tenant, 'User.ReadBasic.All Directory.Read.All');
+    msal.acquireTokenSilent.mockRejectedValueOnce(consentRequired()).mockResolvedValueOnce({ account: identity, accessToken: broader });
+    expect(await auth.getDirectoryAccessToken('group')).toBe(broader);
+    expect(msal.acquireTokenSilent.mock.calls.map(([request]) => request.scopes)).toEqual([
+      ['https://graph.microsoft.com/GroupMember.Read.All'], [auth.DIRECTORY_SCOPE],
+    ]);
+
+    msal.acquireTokenSilent.mockRejectedValueOnce(consentRequired())
+      .mockResolvedValueOnce({ account: identity, accessToken: token(tenant, 'User.ReadBasic.All') });
+    const missing = await auth.getDirectoryAccessToken('servicePrincipal').catch((error: unknown) => error);
+    expect(missing).toMatchObject({ code: 'DirectoryPermissionNotGranted', detail: 'AADSTS65001' });
+    expect((missing as Error).message).toContain('Application.Read.All');
+    expect((missing as Error).message).not.toContain('synthetic-trace');
+
+    msal.acquireTokenSilent.mockRejectedValueOnce(consentRequired()).mockRejectedValueOnce(consentRequired());
+    await expect(auth.getDirectoryAccessToken('user')).rejects.toMatchObject({
+      code: 'DirectoryPermissionNotGranted', detail: 'AADSTS65001',
+    });
+    expect(msal.loginPopup).toHaveBeenCalledOnce();
+  });
+
+  it('reports other Graph token failures by code without raw details, and pins the Graph token tenant', async () => {
+    const { InteractionRequiredAuthError } = await import('@azure/msal-browser');
+    const auth = await import('./admin-auth');
+    await auth.signInAdmin();
+    msal.acquireTokenSilent.mockRejectedValueOnce(new InteractionRequiredAuthError('interaction_required', 'synthetic-correlation',
+      'AADSTS50076: synthetic-sensitive-error-payload', '', '', '', '', '50076'));
+    const failure = auth.getDirectoryAccessToken('user');
+    await expect(failure).rejects.toMatchObject({
+      code: 'DirectoryAccessUnavailable', detail: 'AADSTS50076', message: expect.stringContaining('(AADSTS50076)'),
+    });
+    await expect(failure).rejects.not.toThrow('synthetic-sensitive-error-payload');
+    expect(msal.acquireTokenSilent).toHaveBeenCalledOnce();
+    msal.acquireTokenSilent.mockRejectedValueOnce(new Error('synthetic-sensitive-error-payload'));
+    await expect(auth.getDirectoryAccessToken('group')).rejects.not.toThrow('synthetic-sensitive-error-payload');
+    msal.acquireTokenSilent.mockResolvedValueOnce({
+      account: identity, accessToken: token('44444444-4444-4444-8444-444444444444', 'User.ReadBasic.All'),
+    });
+    await expect(auth.getDirectoryAccessToken('user')).rejects.toMatchObject({ code: 'WrongTenant' });
     expect(msal.loginPopup).toHaveBeenCalledOnce();
   });
 

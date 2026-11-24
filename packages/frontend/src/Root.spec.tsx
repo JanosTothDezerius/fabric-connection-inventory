@@ -21,6 +21,10 @@ vi.mock('./services/admin-auth', () => ({
   signInAdmin: vi.fn(),
   disconnectAdmin: vi.fn(),
 }));
+vi.mock('./services/connection-usage', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./services/connection-usage')>(),
+  loadConnectionUsage: vi.fn(() => new Promise(() => {})),
+}));
 
 const authenticated: OpaqueSession = {
   user: null,

@@ -1,14 +1,22 @@
 import { Fragment, useId, useState } from 'react';
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight } from 'lucide-react';
-import type { ConnectionRow } from '@rayfin-app/shared';
+import type { ConnectionRow, DependentItem } from '@rayfin-app/shared';
 
-import { formatTimestamp, type InventorySort, type SortColumn } from './inventory-model';
+import type { UsageSnapshot } from '@/services/connection-usage';
+import { credentialTypeLabel, formatTimestamp, type InventorySort, type SortColumn } from './inventory-model';
+
+export interface UsageView {
+  snapshot: UsageSnapshot;
+  loading: boolean;
+  cancelled: boolean;
+}
 
 interface ConnectionTableProps {
   rows: ConnectionRow[];
   sort: InventorySort;
   onSort: (column: SortColumn) => void;
   loading: boolean;
+  usage: UsageView;
   emptyTitle: string;
   emptyDescription: string;
 }
@@ -48,6 +56,16 @@ function Owners({ row }: { row: ConnectionRow }) {
                 {owner.displayName && owner.userPrincipalName && (
                   <span className="block">{owner.userPrincipalName}</span>
                 )}
+                {owner.displayName && !owner.userPrincipalName && owner.mail && (
+                  <span className="block">{owner.mail}</span>
+                )}
+                {owner.directoryStatus === 'notFound' && (
+                  <span className="block">Not found in Microsoft Entra ID</span>
+                )}
+                {owner.directoryStatus === 'denied' && (
+                  <span className="block">Name not readable with this app’s permissions</span>
+                )}
+                {owner.directoryStatus === 'failed' && <span className="block">Name lookup failed</span>}
               </div>
             </li>
           ))}
@@ -57,12 +75,67 @@ function Owners({ row }: { row: ConnectionRow }) {
   );
 }
 
-function ConnectionDetails({ row }: { row: ConnectionRow }) {
+const itemCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function DependentWorkloads({ row, usage }: { row: ConnectionRow; usage: UsageView }) {
+  const { snapshot } = usage;
+  const items = [...(snapshot.itemsByConnection.get(row.id.toLowerCase()) ?? [])].sort((a: DependentItem, b: DependentItem) =>
+    itemCollator.compare(a.type, b.type) || itemCollator.compare(a.name, b.name));
+  const finished = !usage.loading && !usage.cancelled && snapshot.phase === 'done';
+  const scanned = snapshot.scannedWorkspaces.toLocaleString();
+  let status: string | undefined;
+  if (usage.loading) {
+    status = snapshot.phase === 'workspaces' ? 'Listing workspaces to scan…' :
+      `Scanning workspaces: ${scanned} of ${snapshot.workspaceCount.toLocaleString()} scanned. More dependent workloads may appear.`;
+  } else if (usage.cancelled) {
+    status = 'The workspace scan was cancelled, so this list may be incomplete.';
+  } else if (snapshot.phase === 'error') {
+    status = `Dependent workloads could not be determined. ${snapshot.error?.message ?? 'The workspace scan did not complete.'}`;
+  } else if (snapshot.failedWorkspaces > 0) {
+    status = `${snapshot.failedWorkspaces.toLocaleString()} of ${snapshot.workspaceCount.toLocaleString()} workspaces could not be scanned, so this list may be incomplete.`;
+  }
+
+  return (
+    <div className="space-y-300 border-t pt-400">
+      <h4 className="font-semibold">
+        Dependent workloads{items.length > 0 && <span className="font-regular text-muted-foreground"> ({items.length.toLocaleString()})</span>}
+      </h4>
+      {items.length > 0 ? (
+        <ul className="space-y-200" aria-label="Dependent workloads">
+          {items.map((item) => (
+            <li key={`${item.workspaceId}:${item.type}:${item.id || item.name}`} className="flex flex-wrap items-center gap-200">
+              <span className="inventory-badge">{item.type}</span>
+              <span className="font-medium">{item.name}</span>
+              <span className="text-200 text-muted-foreground">
+                in {item.workspaceName ?? item.workspaceId}{item.workspaceState && ` (workspace ${item.workspaceState})`}
+              </span>
+              {item.misconfigured && <span className="inventory-badge inventory-badge-accent">Misconfigured binding</span>}
+            </li>
+          ))}
+        </ul>
+      ) : finished && (
+        <p>
+          {snapshot.failedWorkspaces > 0 ?
+            `Not used by any workload in the ${scanned} workspaces that were scanned.` :
+            `Not used by any workload. No item in the ${scanned} scanned workspaces is bound to this connection.`}
+        </p>
+      )}
+      {status && <p className="text-200 text-muted-foreground">{status}</p>}
+      <p className="text-200 text-muted-foreground">
+        Based on the Fabric admin workspace scanner, which reports the connections that items such as semantic models,
+        dataflows, data pipelines, Copy jobs and lakehouses are bound to. Connections referenced only from code, such as
+        in notebooks, are not detected.
+      </p>
+    </div>
+  );
+}
+
+function ConnectionDetails({ row, usage }: { row: ConnectionRow; usage: UsageView }) {
   const details = [
     ['Connectivity', row.connectivityType],
     ['Gateway ID', row.gatewayId],
     ['Privacy level', row.privacyLevel],
-    ['Authentication type', row.credentialType],
+    ['Authentication type', row.credentialType && credentialTypeLabel(row.credentialType)],
     ['Created', formatTimestamp(row.createdDateTime)],
     ['Credentials last used', formatTimestamp(row.lastCredentialUsedDateTime)],
   ];
@@ -95,12 +168,13 @@ function ConnectionDetails({ row }: { row: ConnectionRow }) {
           </p>
         </div>
       )}
+      <DependentWorkloads row={row} usage={usage} />
     </div>
   );
 }
 
 export function ConnectionTable({
-  rows, sort, onSort, loading, emptyTitle, emptyDescription,
+  rows, sort, onSort, loading, usage, emptyTitle, emptyDescription,
 }: ConnectionTableProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const tableId = useId();
@@ -171,12 +245,13 @@ export function ConnectionTable({
                   <td><Owners row={row} /></td>
                   <td>
                     <span className="inventory-badge">{row.connectorType || 'Not returned'}</span>
+                    <p className="mt-200 text-200 text-muted-foreground">Auth: {credentialTypeLabel(row.credentialType)}</p>
                   </td>
                   <td className="font-monospace text-200">{row.endpoint || 'Not returned'}</td>
                 </tr>
                 {isExpanded && (
                   <tr id={detailId} className="inventory-detail-row">
-                    <td colSpan={5}><ConnectionDetails row={row} /></td>
+                    <td colSpan={5}><ConnectionDetails row={row} usage={usage} /></td>
                   </tr>
                 )}
               </Fragment>
