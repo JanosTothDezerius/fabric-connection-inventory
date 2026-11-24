@@ -1,8 +1,10 @@
 # Fabric Connection Inventory
 
-A read-only Microsoft Fabric App, built with Rayfin, for tenant administrators
-to enumerate connections, owners, connector and authentication types, endpoint
-paths, and the workloads that depend on each connection.
+A Microsoft Fabric App, built with Rayfin, for tenant administrators to
+enumerate connections, owners, connector and authentication types, endpoint
+paths, and the workloads that depend on each connection, and to take over a
+connection by adding themselves as an owner. Everything except Take over is
+read-only.
 
 This repository is a **single-tenant deployment template**, not a shared
 multitenant service. Each organization deploys its own Fabric App and configures
@@ -25,12 +27,18 @@ connection inventory, or previous deployment records are included.
 - Dependent workloads: each connection's details list the semantic models,
   dataflows, data pipelines, Copy jobs, lakehouses, and other items bound to
   it, or state that no scanned item uses it.
+- Take over: a connection's details have a **Take over** button that adds your
+  signed-in account as an owner of that connection and keeps every existing
+  owner. A notification at the bottom right reports whether it succeeded, and
+  that connection's owners are looked up again and shown immediately, without
+  reloading the inventory. Your own owner entries are marked **You**. Take over
+  needs one more permission (see [API permissions](#api-permissions)).
 - Clear distinction between empty owner results, failed lookups, and unread rows.
 - Refresh, cancellation, responsive layout, and light/dark themes.
 - Paced requests that pause automatically while Fabric throttles, and owner
   lookups that resume without reloading the connection list.
 
-The app only makes read-only requests:
+The inventory only makes read-only requests:
 
 ```text
 GET  https://api.fabric.microsoft.com/v1/admin/connections
@@ -46,7 +54,16 @@ The `getInfo` POST only starts a metadata scan (data source usage and lineage;
 no schemas, expressions, or item users), and the Graph `$batch` POST only
 bundles `GET` requests.
 
-It never changes connections, ownership, credentials, or source data, and never
+Only **Take over** changes anything, and only when you select it. It sends one
+request that adds your signed-in account as an owner, then reads that
+connection's role assignments again:
+
+```text
+POST https://api.fabric.microsoft.com/v1/admin/connections/{id}/roleAssignments   (your account, role Owner)
+```
+
+Apart from that, the app never changes connections, ownership, credentials, or
+source data. It never removes or changes existing role assignments, and never
 contacts the displayed endpoints.
 
 ## Requirements
@@ -120,6 +137,7 @@ flow with PKCE.
 | Microsoft Graph | `User.ReadBasic.All` | For user names | Reads the display name, user principal name, and email address of users that own connections |
 | Microsoft Graph | `GroupMember.Read.All` | For group names | Reads the display name and email address of security groups that own connections |
 | Microsoft Graph | `Application.Read.All` | For service principal names | Reads the display name and application ID of service principals, such as app registrations, managed identities, and workspace identities, that own connections |
+| Power BI Service | `Tenant.ReadWrite.All` | For Take over | Adds your signed-in account as an owner of a connection (Fabric admin API) when you select **Take over** |
 
 - **Every permission needs admin consent**, including `User.ReadBasic.All`.
   The portal's **Admin consent required** column shows **No** for that
@@ -146,6 +164,12 @@ flow with PKCE.
   `https://graph.microsoft.com/User.ReadBasic.All`, and checks
   `https://graph.microsoft.com/.default` for a broader permission granted
   instead. Requests after sign-in are silent and never open a sign-in window.
+- `Tenant.ReadWrite.All` is needed only for **Take over**. Sign-in never asks
+  for it: the app requests `https://api.fabric.microsoft.com/Tenant.ReadWrite.All`
+  silently when you select **Take over**. Without it, everything else works and
+  Take over reports the missing permission (error code `AADSTS65001`). As a
+  delegated permission it only lets the app act as the signed-in account, and
+  Fabric still requires that account to be a Fabric administrator.
 
 Consent doesn't make anyone an administrator. Fabric checks on each request that
 the signed-in account is a Fabric administrator, and Microsoft Graph returns only
@@ -213,6 +237,11 @@ A fully configured app shows:
 | An owner marked **Name not readable with this app's permissions** | Microsoft Graph refused to read that one principal | Select **Retry name lookups** |
 | An owner marked **Name lookup failed** | A temporary Microsoft Graph error | **Refresh inventory** looks the name up again |
 | Only in the deployed app: **Dependent workloads could not be determined** with error code `NetworkError`, or owners marked **Name lookup failed** | The host's Content-Security-Policy, if it sets one, blocks these APIs | Allow `https://api.powerbi.com` and `https://graph.microsoft.com` in its `connect-src` |
+| **Take over failed** with error code `AADSTS65001` | Power BI `Tenant.ReadWrite.All` is missing from the app registration or has no admin consent | Add it, have an administrator grant admin consent (step 2), then select **Take over** again; you don't need to sign in again |
+| **Take over failed** with error code `FabricHttp403` | The account isn't a Fabric administrator, or Fabric refused the change | Choose **Connect again** with a Fabric administrator |
+| **Take over failed** with another error code, such as `FabricHttp409` or a Fabric error code | Fabric didn't accept the change, for example because your account already has another role on the connection | Check the connection in Fabric's **Manage connections and gateways**; the notification shows the request ID for investigation |
+| **Take over failed** saying it isn't known whether you were added | The request timed out or the network failed | Select **Refresh inventory** and check the connection's owners before trying again |
+| After **Take over**, you're listed as **Pending owner** | Fabric adds an administrator who takes over a connection as a pending owner until they update its credentials | In Fabric, open **Settings** > **Manage connections and gateways**, edit the connection, and enter its credentials |
 
 **Retry name lookups** and **Refresh inventory** request fresh Microsoft Graph
 tokens, so newly granted permissions apply without signing in again. If names
@@ -220,13 +249,16 @@ still don't appear, choose **Connect again**.
 
 ### Updating an existing deployment
 
-If you deployed an earlier version, which showed only owner IDs and no dependent
-workloads:
+If you deployed an earlier version:
 
-1. Add the Microsoft Graph permissions you need from
-   [API permissions](#api-permissions) and grant admin consent. Your existing
-   Power BI `Tenant.Read.All` consent already covers dependent workloads.
-2. Rebuild and redeploy with the commands in step 3, then verify as in step 4.
+1. If it showed only owner IDs and no dependent workloads, add the Microsoft
+   Graph permissions you need from [API permissions](#api-permissions) and grant
+   admin consent. Your existing Power BI `Tenant.Read.All` consent already covers
+   dependent workloads.
+2. To use **Take over**, add the delegated Power BI Service permission
+   `Tenant.ReadWrite.All` and grant admin consent. Without it, everything else
+   works as before.
+3. Rebuild and redeploy with the commands in step 3, then verify as in step 4.
 
 No new redirect URIs, `.env` settings, or `rayfin/rayfin.yml` changes are needed.
 
@@ -261,7 +293,9 @@ npm run -w @rayfin-app/frontend dev -- --port 5173 --strictPort
 The outer Fabric AuthGate and protected static hosting remain enabled.
 Fabric, Power BI, and Microsoft Graph requests use **each signed-in user's
 delegated token**, not an app-owner token or a service principal. Database,
-storage, and Functions services are disabled.
+storage, and Functions services are disabled. **Take over** adds exactly one
+owner, the account signed in to the app (the object ID in its token), and never
+adds another principal or changes existing role assignments.
 
 MSAL holds the administrator session in memory only. Reloading may require a new
 explicit connection. Disconnect immediately clears the inventory and the app's
@@ -338,6 +372,12 @@ snapshot; connections may change during enumeration.
   ID returns them. Otherwise, the principal ID and type remain visible.
 - "No owners returned" describes the role-assignment response. It is not proof
   that a connection is orphaned.
+- **Take over** uses Fabric's admin connection management API, which is in
+  preview. Fabric records an administrator added this way as a pending owner
+  (`PendingOwner`) until they update the connection's credentials, which makes
+  them an owner. The button is unavailable while you own the connection or are
+  its pending owner. After a take over, only that connection's owners are looked
+  up again; **Refresh inventory** shows the latest owners of every connection.
 - Missing display names and metadata are marked explicitly.
 - Partial results remain visibly incomplete. Unread or failed owner lookups never
   appear as successful empty results.
@@ -392,6 +432,7 @@ its copyright and license notices. See [LICENSE](LICENSE).
 - [Rayfin CLI deployment](https://learn.microsoft.com/en-us/fabric/apps/create-app-with-cli)
 - [Admin List Connections](https://learn.microsoft.com/en-us/rest/api/fabric/admin/connections/list-connections)
 - [Admin List Connection Role Assignments](https://learn.microsoft.com/en-us/rest/api/fabric/admin/connections/list-connection-role-assignments)
+- [Admin Add Connection Role Assignment](https://learn.microsoft.com/en-us/rest/api/fabric/admin/connections/add-connection-role-assignment)
 - [Metadata scanning (scanner API)](https://learn.microsoft.com/en-us/fabric/governance/metadata-scanning-overview)
 - [Microsoft Graph JSON batching](https://learn.microsoft.com/en-us/graph/json-batching)
 - [Microsoft Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference)

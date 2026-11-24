@@ -291,6 +291,10 @@ body,
     cursor: not-allowed;
   }
 
+  .inventory-button-primary:disabled {
+    border-color: var(--cp-border);
+  }
+
   .inventory-icon-button {
     width: 40px;
     padding: var(--spacing-200);
@@ -641,6 +645,76 @@ body,
 
   .inventory-skip-link:focus { transform: translateY(0); }
 
+  .inventory-take-over {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--spacing-300);
+  }
+
+  .inventory-take-over > p {
+    max-width: 360px;
+  }
+
+  /* Fixed to the bottom right of the visible screen, including when the app is embedded in Fabric. */
+  .inventory-toasts {
+    position: fixed;
+    z-index: 50;
+    right: var(--spacing-400);
+    bottom: var(--spacing-400);
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-300);
+    width: min(400px, calc(100vw - 2 * var(--spacing-400)));
+    pointer-events: none;
+  }
+
+  .inventory-toast {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--spacing-300);
+    padding: var(--spacing-400);
+    border: 1px solid var(--cp-border);
+    border-left: 4px solid var(--cp-success);
+    border-radius: var(--radius-xl);
+    background: var(--cp-surface);
+    color: var(--cp-text);
+    box-shadow: var(--cp-shadow);
+    pointer-events: auto;
+    animation: inventory-toast-in 160ms ease-out;
+  }
+
+  .inventory-toast > svg {
+    color: var(--cp-success);
+  }
+
+  .inventory-toast[data-tone="error"] {
+    border-left-color: var(--cp-danger);
+  }
+
+  .inventory-toast[data-tone="error"] > svg {
+    color: var(--cp-danger);
+  }
+
+  .inventory-toast-close {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    margin: calc(-1 * var(--spacing-100)) calc(-1 * var(--spacing-100)) 0 0;
+    border-radius: var(--radius-md);
+    color: var(--cp-text-soft);
+    cursor: pointer;
+  }
+
+  .inventory-toast-close:hover {
+    background: var(--cp-surface-soft);
+    color: var(--cp-text);
+  }
+
   @media (max-width: 1000px) {
     .inventory-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .inventory-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -658,5 +732,17 @@ body,
 
   @media (prefers-reduced-motion: reduce) {
     .inventory-button, .inventory-icon-button { transition: none; }
+    .inventory-toast { animation: none; }
+  }
+}
+
+@keyframes inventory-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
   }
 }

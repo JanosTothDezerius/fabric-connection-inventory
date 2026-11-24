@@ -16,13 +16,16 @@ import { InventoryHeader } from '@/components/inventory/inventory-header';
 import { InventoryStatus } from '@/components/inventory/inventory-status';
 import { OwnerNameStatus, UsageStatus } from '@/components/inventory/lookup-status';
 import { MultiSelect } from '@/components/inventory/multi-select';
+import { Notifications } from '@/components/inventory/notifications';
 import {
   connectorTypeOptions, credentialTypeOptions, formatTimestamp, PAGE_SIZE, selectConnections, summarizeInventory,
   withDirectoryNames, workspaceOptions, type InventoryFilters, type InventorySort, type SortColumn,
 } from '@/components/inventory/inventory-model';
 import { useConnectionUsage } from '@/hooks/use-connection-usage';
 import { useInventory } from '@/hooks/use-inventory';
+import { useNotifications } from '@/hooks/use-notifications';
 import { usePrincipalNames } from '@/hooks/use-principal-names';
+import { useTakeOver } from '@/hooks/use-take-over';
 import {
   disconnectAdmin, getAdminSession, signInAdmin, type AdminSession,
 } from '@/services/admin-auth';
@@ -175,9 +178,11 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
   onDisconnect: () => void;
   onReconnect: () => void;
 }) {
-  const { snapshot, loading, cancelled, refresh, resume, cancel } = useInventory();
+  const { snapshot, loading, cancelled, refresh, resume, cancel, updateOwners } = useInventory();
   const usage = useConnectionUsage();
   const names = usePrincipalNames(snapshot.connections);
+  const notifications = useNotifications();
+  const { pending: takeOversPending, takeOver } = useTakeOver(updateOwners, notifications.notify);
   const labels = getInventoryLabels();
   const [filters, setFilters] = useState<InventoryFilters>(emptyFilters);
   const [sort, setSort] = useState<InventorySort>({ column: 'displayName', direction: 'asc' });
@@ -273,7 +278,7 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
             <p className="inventory-eyebrow">CONNECTION GOVERNANCE</p>
             <h1 id="page-title" className="text-hero-800 leading-hero-800 font-semibold">Connection inventory</h1>
             <p className="max-w-prose text-400 leading-400 text-muted-foreground">
-              Review tenant connections, ownership, and endpoints in one place. Nothing here changes your Fabric configuration.
+              Review tenant connections, ownership, and endpoints in one place. Nothing here changes your Fabric configuration unless you choose Take over on a connection.
             </p>
           </div>
           <div className="space-y-200">
@@ -299,7 +304,10 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
         <section className="inventory-access-note" aria-label="Access and deployment context">
           <ShieldCheck className="icon-size-300 shrink-0" aria-hidden="true" />
           <div className="min-w-0 flex-1 space-y-100">
-            <p>Requests use your signed-in account; Fabric enforces tenant-admin permissions. Read-only <span className="font-monospace">Tenant.Read.All</span>.</p>
+            <p>
+              Requests use your signed-in account; Fabric enforces tenant-admin permissions. Read-only <span className="font-monospace">Tenant.Read.All</span>;
+              {' '}Take over also requests <span className="font-monospace">Tenant.ReadWrite.All</span>.
+            </p>
             <p className="break-words">Signed-in account: <strong>{session.username || 'Account name not provided'}</strong></p>
             <p className="text-200 text-muted-foreground">
               Hosted in <span className="font-medium">{labels.workspace}</span>. Inventory scope: {labels.tenant}.
@@ -411,6 +419,11 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
             onSort={updateSort}
             loading={loading}
             usage={usage}
+            takeOver={{
+              accountId: session.principalId,
+              pending: takeOversPending,
+              onTakeOver: (row) => { void takeOver(row); },
+            }}
             emptyTitle={emptyTitle}
             emptyDescription={emptyDescription}
           />
@@ -444,6 +457,7 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
           </p>
         </footer>
       </main>
+      <Notifications items={notifications.items} onDismiss={notifications.dismiss} />
     </div>
   );
 }

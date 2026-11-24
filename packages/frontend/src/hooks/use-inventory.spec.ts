@@ -1,6 +1,6 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { InventorySnapshot, LoadInventoryOptions } from '@rayfin-app/shared';
+import type { ConnectionRow, InventorySnapshot, LoadInventoryOptions } from '@rayfin-app/shared';
 
 import { loadInventory } from '@/services/inventory';
 import { syntheticConnection, syntheticSnapshot } from '@/test/inventory-fixtures';
@@ -137,5 +137,66 @@ describe('useInventory request lifecycle', () => {
     act(() => result.current.resume());
     expect(mockLoad).toHaveBeenCalledTimes(1);
     expect(result.current.loading).toBe(false);
+  });
+});
+
+describe('useInventory ownership changes', () => {
+  const existing = { id: 'synthetic-group', type: 'Group', role: 'Owner' as const };
+  const admin = { id: 'synthetic-admin', type: 'User', role: 'PendingOwner' as const };
+
+  it('shows one connection’s new owners at once and keeps the added owner until a lookup lists it', async () => {
+    const request = deferred();
+    let options!: LoadInventoryOptions;
+    mockLoad.mockImplementation((value) => { options = value; return request.promise; });
+    const { result } = renderHook(useInventory);
+    const publish = (...connections: ConnectionRow[]) =>
+      act(() => options.onProgress(syntheticSnapshot(connections, { phase: 'owners', updatedAt: null })));
+    const other = syntheticConnection({ id: 'other', ownerStatus: 'pending' });
+    publish(syntheticConnection({ id: 'owned', ownerStatus: 'pending' }), other);
+
+    act(() => result.current.updateOwners('owned', { owners: [existing, admin], added: admin }));
+    expect(result.current.snapshot.connections[0]).toMatchObject({ ownerStatus: 'loaded', owners: [existing, admin] });
+    expect(result.current.snapshot.connections[1]).toBe(other);
+
+    // A lookup requested before the change, published after it, doesn't list the new owner yet.
+    const otherLoaded = syntheticConnection({ id: 'other' });
+    publish(syntheticConnection({ id: 'owned', owners: [existing] }), otherLoaded);
+    expect(result.current.snapshot.connections.map((row) => row.owners)).toEqual([[existing, admin], []]);
+    publish(syntheticConnection({
+      id: 'owned', ownerStatus: 'error', ownerError: { code: 'Synthetic', message: 'Synthetic' },
+    }), otherLoaded);
+    expect(result.current.snapshot.connections[0]).toMatchObject({ ownerStatus: 'loaded', owners: [existing, admin] });
+
+    const listed = syntheticConnection({ id: 'owned', owners: [existing, { ...admin, role: 'Owner' }] });
+    await act(async () => request.resolve(syntheticSnapshot([listed, otherLoaded])));
+    expect(result.current.snapshot.connections[0]).toBe(listed);
+  });
+
+  it('lists an added owner the lookup misses, keeps unrefreshed lookup states, and resumes from the rows shown', async () => {
+    const options: LoadInventoryOptions[] = [];
+    mockLoad
+      .mockImplementationOnce(async (value) => {
+        options.push(value);
+        return syntheticSnapshot([
+          syntheticConnection({ id: 'failed', ownerStatus: 'error', ownerError: { code: 'Synthetic', message: 'Synthetic' } }),
+          syntheticConnection({ id: 'pending', ownerStatus: 'pending', owners: [existing] }),
+        ], { phase: 'error', updatedAt: null, error: { code: 'FabricHttp429', message: 'Synthetic throttling', status: 429 } });
+      })
+      .mockImplementationOnce((value) => { options.push(value); return new Promise(() => {}); });
+    const { result } = renderHook(useInventory);
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => {
+      result.current.updateOwners('failed', { owners: [existing], added: admin });
+      result.current.updateOwners('pending', { added: admin });
+      result.current.updateOwners('not-loaded', { added: admin });
+    });
+    const [failed, pending] = result.current.snapshot.connections;
+    expect(failed).toMatchObject({ ownerStatus: 'loaded', ownerError: undefined, owners: [existing, admin] });
+    expect(pending).toMatchObject({ ownerStatus: 'pending', owners: [existing, admin] });
+    expect(result.current.snapshot.connections).toHaveLength(2);
+
+    act(() => result.current.resume());
+    expect(options[1].resumeFrom?.connections).toEqual([failed, pending]);
   });
 });

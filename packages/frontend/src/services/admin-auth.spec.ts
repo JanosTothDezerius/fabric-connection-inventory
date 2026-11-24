@@ -233,6 +233,41 @@ describe('configured single-tenant delegated authentication', () => {
     expect(msal.loginPopup).toHaveBeenCalledOnce();
   });
 
+  it('requests Tenant.ReadWrite.All silently only for Take over, for the signed-in account only', async () => {
+    const { InteractionRequiredAuthError } = await import('@azure/msal-browser');
+    const oid = '55555555-5555-4555-8555-555555555555';
+    const signedIn = { ...identity, localAccountId: oid.toUpperCase() };
+    const writeToken = (id: string) =>
+      `header.${btoa(JSON.stringify({ tid: tenant, scp: 'Tenant.Read.All Tenant.ReadWrite.All', oid: id }))}.synthetic-signature`;
+    msal.loginPopup.mockResolvedValue({ account: signedIn, accessToken: token() });
+    const auth = await import('./admin-auth');
+    await expect(auth.getConnectionWriteAccess()).rejects.toMatchObject({ code: 'AdminSignInRequired' });
+    expect(await auth.signInAdmin()).toEqual({ username: identity.username, tenantId: tenant, principalId: oid });
+    expect(msal.loginPopup).toHaveBeenCalledWith({ scopes: [auth.ADMIN_SCOPE], prompt: 'select_account' });
+
+    msal.acquireTokenSilent.mockResolvedValueOnce({ account: signedIn, accessToken: writeToken(oid) });
+    expect(await auth.getConnectionWriteAccess()).toEqual({ token: writeToken(oid), principalId: oid });
+    expect(msal.acquireTokenSilent).toHaveBeenLastCalledWith({
+      account: signedIn, scopes: ['https://api.fabric.microsoft.com/Tenant.ReadWrite.All'],
+    });
+
+    msal.acquireTokenSilent.mockResolvedValueOnce({
+      account: signedIn, accessToken: writeToken('66666666-6666-4666-8666-666666666666'),
+    });
+    await expect(auth.getConnectionWriteAccess()).rejects.toMatchObject({ code: 'WrongAccount' });
+    msal.acquireTokenSilent.mockResolvedValueOnce({ account: signedIn, accessToken: token() });
+    await expect(auth.getConnectionWriteAccess()).rejects.toMatchObject({ code: 'WriteScopeMissing' });
+
+    msal.acquireTokenSilent.mockRejectedValueOnce(new InteractionRequiredAuthError('invalid_grant', 'synthetic-correlation',
+      'AADSTS65001: synthetic-sensitive-error-payload', 'consent_required', '', '', '', '65001'));
+    const missing = auth.getConnectionWriteAccess();
+    await expect(missing).rejects.toMatchObject({
+      code: 'TakeOverPermissionNotGranted', detail: 'AADSTS65001', message: expect.stringContaining('Tenant.ReadWrite.All'),
+    });
+    await expect(missing).rejects.not.toThrow('synthetic-sensitive-error-payload');
+    expect(msal.loginPopup).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ['VITE_ADMIN_TENANT_ID', undefined, 'AdminConfigurationRequired'],
     ['VITE_ADMIN_CLIENT_ID', 'invalid-client', 'InvalidAdminConfiguration'],

@@ -20,7 +20,7 @@ export function InventoryHeader({ children }: { children?: ReactNode }) {
         </div>
         <div className="flex flex-wrap items-center gap-300">
           <span className="inventory-badge">
-            <LockKeyhole className="icon-size-100" aria-hidden="true" /> Read-only
+            <LockKeyhole className="icon-size-100" aria-hidden="true" /> Read-only by default
           </span>
           {children}
           <button

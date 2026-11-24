@@ -1,6 +1,6 @@
 {
   "name": "fabric-connection-inventory",
-  "description": "Read-only tenant connection and ownership inventory for Microsoft Fabric.",
+  "description": "Tenant connection and ownership inventory for Microsoft Fabric, with connection take over.",
   "license": "MIT",
   "private": true,
   "version": "0.1.0",

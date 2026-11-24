@@ -18,6 +18,9 @@ export {
   isDirectoryPrincipal, requireDirectoryToken,
   type DirectoryKind, type DirectoryLookupResult, type PrincipalLookup, type PrincipalReference,
 } from './directory-api.js';
+export {
+  CONNECTION_OWNER_PERMISSION, ConnectionOwnership, requireTenantWriteToken, type TenantWriteAccess,
+} from './ownership-api.js';
 
 export interface ApiFailure {
   code: string;

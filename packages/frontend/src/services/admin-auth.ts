@@ -3,14 +3,17 @@ import {
   type AccountInfo, type AuthenticationResult,
 } from '@azure/msal-browser';
 import {
-  DIRECTORY_READ_PERMISSIONS, InventoryError, directoryTokenScopes, requireDirectoryToken, requireTenantAdminToken,
-  type DirectoryKind,
+  CONNECTION_OWNER_PERMISSION, DIRECTORY_READ_PERMISSIONS, InventoryError, directoryTokenScopes, requireDirectoryToken,
+  requireTenantAdminToken, requireTenantWriteToken,
+  type DirectoryKind, type TenantWriteAccess,
 } from '@rayfin-app/shared';
 import { AdminConfigError, readAdminConfig, type AdminConfig } from './admin-config';
 
 export interface AdminSession {
   username: string;
   tenantId: string;
+  /** Lower-case Microsoft Entra object ID of the signed-in account, when its ID token provides one. */
+  principalId?: string;
 }
 
 export class AdminAuthError extends Error {
@@ -22,6 +25,8 @@ export class AdminAuthError extends Error {
 }
 
 export const ADMIN_SCOPE = 'https://api.fabric.microsoft.com/Tenant.Read.All';
+/** Lets a Fabric administrator add connection owners. Requested only when Take over is used, never at sign-in. */
+export const ADMIN_WRITE_SCOPE = `https://api.fabric.microsoft.com/${CONNECTION_OWNER_PERMISSION}`;
 /** The same consented Tenant.Read.All permission, with the audience of the Power BI admin scanner API. */
 export const POWER_BI_ADMIN_SCOPE = 'https://analysis.windows.net/powerbi/api/Tenant.Read.All';
 const GRAPH_RESOURCE = 'https://graph.microsoft.com';
@@ -84,11 +89,22 @@ function authFailure(error: unknown): AdminAuthError {
     `Microsoft admin sign-in failed (${code}). Allow popups, verify consent, and reconnect.`);
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The account's object ID in the configured tenant, from its ID token. */
+function accountObjectId(value: AccountInfo): string | undefined {
+  const id = value.idTokenClaims?.oid ?? value.localAccountId;
+  return typeof id === 'string' && UUID.test(id) ? id.toLowerCase() : undefined;
+}
+
+function session(value: AccountInfo): AdminSession {
+  return { username: value.username, tenantId: value.tenantId, principalId: accountObjectId(value) };
+}
+
 export function getAdminSession(): AdminSession | null {
   try {
     const config = readAdminConfig();
-    return account?.tenantId.toLowerCase() === config.tenantId ?
-      { username: account.username, tenantId: account.tenantId } : null;
+    return account?.tenantId.toLowerCase() === config.tenantId ? session(account) : null;
   } catch {
     return null;
   }
@@ -108,7 +124,7 @@ export async function signInAdmin(): Promise<AdminSession> {
     }
     account = validateResult(result, config);
     instance.setActiveAccount(account);
-    return { username: account.username, tenantId: account.tenantId };
+    return session(account);
   } catch (error) {
     throw authFailure(error);
   }
@@ -221,6 +237,38 @@ export async function getDirectoryAccessToken(kind: DirectoryKind, forceRefresh 
   const code = errorCodeOf(consentError);
   throw new AdminAuthError('DirectoryPermissionNotGranted',
     `The delegated Microsoft Graph permission ${permissions[0]} has not been granted to this app with consent (${code}).`, code);
+}
+
+/**
+ * A token that lets the signed-in Fabric administrator add themselves as a connection owner, with the
+ * account's object ID. It is requested only when a take over starts, silently, and never opens a sign-in
+ * window. Throws AdminAuthError `TakeOverPermissionNotGranted` when Tenant.ReadWrite.All has no consent.
+ */
+export async function getConnectionWriteAccess(): Promise<TenantWriteAccess> {
+  try {
+    const { result, config } = await acquireSilently(ADMIN_WRITE_SCOPE, false);
+    if (!result.account || result.account.tenantId.toLowerCase() !== config.tenantId) {
+      throw new AdminAuthError('WrongTenant', 'Connect an administrator account in the configured tenant.');
+    }
+    const access = requireTenantWriteToken(result.accessToken, config.tenantId);
+    // Only the account signed in to this app may become an owner.
+    const signedIn = account ? accountObjectId(account) : undefined;
+    if (signedIn && signedIn !== access.principalId) {
+      throw new AdminAuthError('WrongAccount', 'The access token belongs to a different account than the one signed in. Choose Connect again.');
+    }
+    return access;
+  } catch (error) {
+    if (error instanceof AdminAuthError || error instanceof AdminConfigError || error instanceof InventoryError) {
+      throw authFailure(error);
+    }
+    const code = errorCodeOf(error);
+    if (consentMissing(error)) {
+      throw new AdminAuthError('TakeOverPermissionNotGranted',
+        `The delegated Power BI Service permission ${CONNECTION_OWNER_PERMISSION} has not been granted to this app with admin consent (${code}).`, code);
+    }
+    throw new AdminAuthError('TakeOverTokenUnavailable',
+      `Microsoft Entra ID did not issue a token for Take over (${code}). Retry; if this continues, choose Connect again.`, code);
+  }
 }
 
 export async function disconnectAdmin(): Promise<void> {
