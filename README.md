@@ -29,9 +29,13 @@ connection inventory, or previous deployment records are included.
   it, or state that no scanned item uses it.
 - Take over: a connection's details have a **Take over** button that adds your
   signed-in account as an owner of that connection and keeps every existing
-  owner. A notification at the bottom right reports whether it succeeded, and
-  that connection's owners are looked up again and shown immediately, without
-  reloading the inventory. Your own owner entries are marked **You**.
+  owner. Before anything changes, a confirmation shows the connection's endpoint
+  and what you must do afterwards: update the connection's credentials in
+  Fabric with ones that can access that endpoint, which also become the
+  credentials its dependent workloads run with. A notification at the bottom
+  right reports whether the take over succeeded, and that connection's owners
+  are looked up again and shown immediately, without reloading the inventory.
+  Your own owner entries are marked **You**.
 - Clear distinction between empty owner results, failed lookups, and unread rows.
 - Refresh, cancellation, responsive layout, and light/dark themes.
 - Paced requests that pause automatically while Fabric throttles, and owner
@@ -53,7 +57,7 @@ The `getInfo` POST only starts a metadata scan (data source usage and lineage;
 no schemas, expressions, or item users), and the Graph `$batch` POST only
 bundles `GET` requests.
 
-Only **Take over** changes anything, and only when you select it. It sends one
+Only **Take over** changes anything, and only after you confirm it. It sends one
 request that adds your signed-in account as an owner, then reads that
 connection's role assignments again:
 

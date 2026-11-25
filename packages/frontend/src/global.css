@@ -23,6 +23,7 @@
   --cp-link: #0078d4;
   --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12);
   --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-scrim: rgba(0, 0, 0, 0.4);
   --cp-panel: rgba(255, 255, 255, 0.86);
   --cp-panel-strong: rgba(255, 255, 255, 0.96);
   --cp-sheen: rgba(255, 255, 255, 0.55);
@@ -49,6 +50,7 @@ html[data-theme="dark"] {
   --cp-link: #4da6ff;
   --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
   --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-scrim: rgba(0, 0, 0, 0.6);
   --cp-panel: rgba(41, 41, 41, 0.72);
   --cp-panel-strong: rgba(41, 41, 41, 0.96);
   --cp-sheen: rgba(255, 255, 255, 0.04);
@@ -715,6 +717,52 @@ body,
     color: var(--cp-text);
   }
 
+  /* Modal, and above the notifications. */
+  .inventory-dialog-backdrop {
+    position: fixed;
+    z-index: 60;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--spacing-400);
+    background: var(--cp-scrim);
+  }
+
+  .inventory-dialog {
+    display: grid;
+    gap: var(--spacing-500);
+    width: min(560px, 100%);
+    max-height: 100%;
+    overflow-y: auto;
+    padding: var(--spacing-600);
+    border: 1px solid var(--cp-border);
+    border-radius: var(--radius-xl);
+    background: var(--cp-surface);
+    color: var(--cp-text);
+    box-shadow: var(--cp-shadow);
+  }
+
+  .inventory-dialog:focus {
+    outline: none;
+  }
+
+  .inventory-dialog-facts {
+    display: grid;
+    gap: var(--spacing-300);
+    padding: var(--spacing-400);
+    border: 1px solid var(--cp-border);
+    border-radius: var(--radius-xl);
+    background: var(--cp-bg-elevated);
+  }
+
+  .inventory-dialog-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--spacing-300);
+  }
+
   @media (max-width: 1000px) {
     .inventory-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .inventory-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -728,6 +776,7 @@ body,
     .inventory-metric-number { font-size: var(--text-hero-700); }
     .inventory-notice { flex-wrap: wrap; }
     .inventory-notice > .inventory-button { margin-left: var(--spacing-800); }
+    .inventory-dialog { padding: var(--spacing-500); }
   }
 
   @media (prefers-reduced-motion: reduce) {

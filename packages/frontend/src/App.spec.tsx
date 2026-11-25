@@ -368,10 +368,15 @@ describe('Connection inventory', () => {
     const takeOver = screen.getByRole('button', { name: 'Take over' });
     expect(takeOver).toHaveAccessibleDescription('Adds your signed-in account as an owner. Existing owners are kept.');
     fireEvent.click(takeOver);
+    expect(takeOverConnection).not.toHaveBeenCalled();
+    const confirmation = screen.getByRole('alertdialog', { name: 'Take over Synthetic target?' });
+    fireEvent.click(within(confirmation).getByRole('button', { name: 'Take over' }));
+    expect(confirmation).not.toBeInTheDocument();
     fireEvent.click(takeOver);
     expect(takeOverConnection).toHaveBeenCalledOnce();
     expect(takeOverConnection).toHaveBeenCalledWith('target');
     expect(takeOver).toBeDisabled();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
 
     const added = { id: admin, type: 'User', role: 'PendingOwner' as const };
     await act(async () => finish({ principalId: admin, added, owners: [group, added] }));
@@ -399,6 +404,7 @@ describe('Connection inventory', () => {
     render(<App />);
     fireEvent.click(await screen.findByRole('button', { name: 'Show details for Synthetic target' }));
     fireEvent.click(screen.getByRole('button', { name: 'Take over' }));
+    fireEvent.click(within(screen.getByRole('alertdialog', { name: 'Take over Synthetic target?' })).getByRole('button', { name: 'Take over' }));
 
     const alert = await within(screen.getByRole('region', { name: 'Notifications' })).findByRole('alert');
     expect(alert).toHaveTextContent('Take over failed');
@@ -408,6 +414,73 @@ describe('Connection inventory', () => {
     expect(alert).toHaveTextContent('Request ID: synthetic-request-id');
     expect(within(screen.getByRole('table')).getByText('No owners returned')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Take over' })).toBeEnabled();
+  });
+
+  it('asks for confirmation, listing the steps after a take over and the endpoint, and changes nothing when cancelled', async () => {
+    mockLoad.mockResolvedValue(syntheticSnapshot([
+      syntheticConnection({ id: 'target', displayName: 'Synthetic target', credentialType: 'OAuth2' }),
+    ]));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show details for Synthetic target' }));
+    const takeOver = screen.getByRole('button', { name: 'Take over' });
+    fireEvent.click(takeOver);
+
+    const dialog = screen.getByRole('alertdialog', { name: 'Take over Synthetic target?' });
+    expect(dialog).toHaveAccessibleDescription(/^You’ll be added as a pending owner, and existing owners are kept\./);
+    expect(dialog).toHaveTextContent('open Settings > Manage connections and gateways, and open this connection’s settings on the Connections tab.');
+    expect(dialog).toHaveTextContent('Enter credentials that can access the endpoint below, and save. For OAuth2, select Edit credentials and sign in. This makes you an owner.');
+    expect(dialog).toHaveTextContent('Make sure those credentials work for every item under Dependent workloads');
+    expect(within(dialog).getByText('synthetic.example.invalid;database=test')).toBeVisible();
+    expect(within(dialog).getByText('SyntheticSQL')).toBeVisible();
+    expect(within(dialog).getByText('OAuth2')).toBeVisible();
+    expect(within(dialog).getByText('Continue only if these steps are clear to you and you’ve confirmed that you have the access or credentials this endpoint needs.')).toBeVisible();
+
+    const cancel = within(dialog).getByRole('button', { name: 'Cancel' });
+    const confirm = within(dialog).getByRole('button', { name: 'Take over' });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(cancel, { key: 'Tab', shiftKey: true });
+    expect(confirm).toHaveFocus();
+    fireEvent.keyDown(confirm, { key: 'Tab' });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(cancel, { key: 'Escape' });
+    expect(dialog).not.toBeInTheDocument();
+    expect(takeOver).toHaveFocus();
+
+    fireEvent.click(takeOver);
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(takeOver).toHaveFocus();
+    expect(takeOverConnection).not.toHaveBeenCalled();
+  });
+
+  it('closes the confirmation when owner lookups show the signed-in account already has a role', () => {
+    const admin = 'synthetic-admin-principal';
+    vi.mocked(getAdminSession).mockReturnValue({
+      username: 'synthetic-admin@example.test', tenantId: syntheticTenantId, principalId: admin, permissions: ['Tenant.ReadWrite.All'],
+    });
+    let options!: LoadInventoryOptions;
+    mockLoad.mockImplementation((value) => {
+      options = value;
+      return new Promise(() => {});
+    });
+    render(<App />);
+    const target = syntheticConnection({ id: 'target', displayName: 'Synthetic target', ownerStatus: 'pending' });
+    act(() => options.onProgress(syntheticSnapshot([target], { phase: 'owners', updatedAt: null })));
+    fireEvent.click(screen.getByRole('button', { name: 'Show details for Synthetic target' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Take over' }));
+    expect(screen.getByRole('alertdialog', { name: 'Take over Synthetic target?' })).toBeVisible();
+
+    act(() => options.onProgress(syntheticSnapshot(
+      [{ ...target, ownerStatus: 'loaded', owners: [{ id: admin, type: 'User', role: 'Owner' }] }],
+      { phase: 'owners', updatedAt: null },
+    )));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Take over' })).toHaveAccessibleDescription('You already own this connection.');
+    expect(takeOverConnection).not.toHaveBeenCalled();
+
+    act(() => options.onProgress(syntheticSnapshot([{ ...target, ownerStatus: 'loaded' }], { phase: 'owners', updatedAt: null })));
+    expect(screen.getByRole('button', { name: 'Take over' })).toBeEnabled();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
   });
 
   it.each([
@@ -430,6 +503,7 @@ describe('Connection inventory', () => {
       expect(takeOver).toBeDisabled();
       expect(takeOver).toHaveAccessibleDescription('Take over needs the Power BI Service permission Tenant.ReadWrite.All, which this app doesn’t have.');
       fireEvent.click(takeOver);
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
       expect(takeOverConnection).not.toHaveBeenCalled();
     }
   });

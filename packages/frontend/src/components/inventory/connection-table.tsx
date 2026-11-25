@@ -1,4 +1,4 @@
-import { Fragment, useId, useState } from 'react';
+import { Fragment, useId, useRef, useState } from 'react';
 import {
   ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight, LoaderCircle, UserPlus,
 } from 'lucide-react';
@@ -6,6 +6,7 @@ import type { ConnectionOwner, ConnectionRow, DependentItem } from '@rayfin-app/
 
 import type { UsageSnapshot } from '@/services/connection-usage';
 import { credentialTypeLabel, formatTimestamp, type InventorySort, type SortColumn } from './inventory-model';
+import { TakeOverConfirmation } from './take-over-confirmation';
 
 export interface UsageView {
   snapshot: UsageSnapshot;
@@ -148,30 +149,52 @@ function DependentWorkloads({ row, usage }: { row: ConnectionRow; usage: UsageVi
   );
 }
 
-/** Adds the signed-in account as an owner; shown only in a connection's expanded details. */
+/** Adds the signed-in account as an owner once confirmed; shown only in a connection's expanded details. */
 function TakeOverAction({ row, takeOver }: { row: ConnectionRow; takeOver: TakeOverView }) {
   const noteId = useId();
+  const button = useRef<HTMLButtonElement>(null);
+  const [confirming, setConfirming] = useState(false);
   const busy = takeOver.pending.has(row.id);
   const own = row.owners.find((owner) => isAccount(owner, takeOver.accountId));
+  const disabled = busy || own !== undefined || !takeOver.available;
+  // Closes the confirmation if Take over stops being possible meanwhile, such as when owner lookups show the account's role.
+  if (confirming && disabled) setConfirming(false);
   const note = busy ? 'Adding your account as an owner…' :
     own?.role === 'Owner' ? 'You already own this connection.' :
       own ? 'You’re a pending owner. Update the connection’s credentials to make your ownership effective.' :
         !takeOver.available ? 'Take over needs the Power BI Service permission Tenant.ReadWrite.All, which this app doesn’t have.' :
           'Adds your signed-in account as an owner. Existing owners are kept.';
 
+  function close() {
+    setConfirming(false);
+    button.current?.focus();
+  }
+
   return (
     <div className="inventory-take-over">
       <p id={noteId} className="text-200 text-muted-foreground">{note}</p>
       <button
+        ref={button}
         className="inventory-button inventory-button-primary"
-        onClick={() => takeOver.onTakeOver(row)}
-        disabled={busy || own !== undefined || !takeOver.available}
+        onClick={() => setConfirming(true)}
+        disabled={disabled}
         aria-describedby={noteId}
+        aria-haspopup="dialog"
       >
         {busy ? <LoaderCircle className="icon-size-200 motion-safe:animate-spin" aria-hidden="true" /> :
           <UserPlus className="icon-size-200" aria-hidden="true" />}
         Take over
       </button>
+      {confirming && !disabled && (
+        <TakeOverConfirmation
+          row={row}
+          onCancel={close}
+          onConfirm={() => {
+            close();
+            takeOver.onTakeOver(row);
+          }}
+        />
+      )}
     </div>
   );
 }
