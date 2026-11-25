@@ -61,7 +61,7 @@ describe('Dedicated admin sign-in gate', () => {
 
     expect(screen.getByRole('button', { name: 'Connect admin account' })).toBeVisible();
     expect(screen.getByText('To use this app, sign in with a Fabric administrator account.')).toBeVisible();
-    expect(screen.queryByText(/Read-only permission/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Read-only/)).not.toBeInTheDocument();
     expect(screen.getByText(/This app keeps its admin session only in memory/)).toBeVisible();
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
     expect(mockLoad).not.toHaveBeenCalled();
@@ -73,6 +73,7 @@ describe('Dedicated admin sign-in gate', () => {
     expect(mockLoad).toHaveBeenCalledTimes(1);
     expect(screen.getByText(syntheticAdmin.username)).toBeVisible();
     expect(screen.getByText(/Fabric allows them only for Fabric administrators/)).toBeVisible();
+    expect(screen.queryByText(/Read-only/)).not.toBeInTheDocument();
   });
 
   it('disables repeated connection attempts while a popup is pending and waits before loading data', async () => {
