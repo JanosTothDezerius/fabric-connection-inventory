@@ -14,7 +14,7 @@ const MAX_BACKOFF_MS = 4 * 60_000;
 function requestFailure(): ApiFailure {
   return {
     code: 'InventoryRequestFailed',
-    message: 'The app could not complete its inventory request. Check admin sign-in, tenant-read consent, and network access, then retry.',
+    message: 'The app could not complete its inventory request. Check admin sign-in, the app’s admin consent, and network access, then retry.',
   };
 }
 

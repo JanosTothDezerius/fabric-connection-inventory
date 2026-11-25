@@ -50,11 +50,11 @@ describe('takeOverConnection', () => {
     await expect(takeOverConnection(connectionId)).resolves.toEqual({ principalId, added, refreshError: throttled });
   });
 
-  it('explains a missing Tenant.ReadWrite.All consent without calling Fabric', async () => {
+  it('explains that Take over needs Tenant.ReadWrite.All without calling Fabric', async () => {
     vi.mocked(getConnectionWriteAccess).mockRejectedValue(
-      new AdminAuthError('TakeOverPermissionNotGranted', 'Synthetic consent failure', 'AADSTS65001'));
+      new AdminAuthError('TakeOverPermissionNotGranted', 'Synthetic missing permission', 'WriteScopeMissing'));
     expect(await failureOf(takeOverConnection(connectionId))).toEqual({
-      code: 'AADSTS65001', message: expect.stringContaining('Tenant.ReadWrite.All with admin consent'),
+      code: 'WriteScopeMissing', message: expect.stringContaining('Tenant.ReadWrite.All, which this app doesn’t have'),
     });
     expect(addOwner).not.toHaveBeenCalled();
   });

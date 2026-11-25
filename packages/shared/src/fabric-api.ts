@@ -417,7 +417,7 @@ export class FabricInventory extends PacedApiClient {
 
   protected override failureMessage(status: number): string {
     return status === 403 ?
-      'Access denied. Your signed-in account must be a Fabric administrator and have delegated Tenant.Read.All consent for this app.' :
+      'Access denied. Your signed-in account must be a Fabric administrator, and this app needs delegated Tenant.ReadWrite.All or Tenant.Read.All consent.' :
       status === 401 ? 'Fabric rejected the resource token. Check its audience, expiry, consent, and the admin API identity requirements.' :
       status === 404 ? 'This connection or admin API was not found. The connection may have been deleted, or the preview API may be unavailable.' :
       status === 503 ? 'Fabric remained unavailable after bounded retries.' :

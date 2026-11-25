@@ -37,7 +37,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   configureSyntheticAdminEnvironment();
   vi.mocked(getAdminSession).mockReturnValue({
-    username: 'synthetic-admin@example.test', tenantId: syntheticTenantId,
+    username: 'synthetic-admin@example.test', tenantId: syntheticTenantId, permissions: ['Tenant.ReadWrite.All'],
   });
   mockUsage.mockReturnValue(new Promise(() => {}));
 });
@@ -75,7 +75,7 @@ describe('Connection inventory', () => {
     expect(table.getByText('synthetic-group-principal')).toBeVisible();
     expect(table.getByText('Pending owner')).toBeVisible();
     expect(screen.getByText('Partial owner results.')).toBeVisible();
-    expect(screen.getByText(/Requests use your signed-in account; Fabric enforces tenant-admin permissions/)).toBeVisible();
+    expect(screen.getByText('Requests use your signed-in account, and Fabric allows them only for Fabric administrators.')).toBeVisible();
     expect(screen.getByText('synthetic-admin@example.test')).toBeVisible();
     expect(screen.queryByText(/Backend requests run as the app owner/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Authorized admin:/)).not.toBeInTheDocument();
@@ -352,7 +352,7 @@ describe('Connection inventory', () => {
     const admin = 'synthetic-admin-principal';
     const group = { id: 'synthetic-group-principal', type: 'Group', role: 'Owner' as const };
     vi.mocked(getAdminSession).mockReturnValue({
-      username: 'synthetic-admin@example.test', tenantId: syntheticTenantId, principalId: admin,
+      username: 'synthetic-admin@example.test', tenantId: syntheticTenantId, principalId: admin, permissions: ['Tenant.ReadWrite.All'],
     });
     mockLoad.mockResolvedValue(syntheticSnapshot([
       syntheticConnection({ id: 'target', displayName: 'Synthetic target', owners: [group] }),
@@ -408,6 +408,30 @@ describe('Connection inventory', () => {
     expect(alert).toHaveTextContent('Request ID: synthetic-request-id');
     expect(within(screen.getByRole('table')).getByText('No owners returned')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Take over' })).toBeEnabled();
+  });
+
+  it.each([
+    [['Tenant.ReadWrite.All'], 'Power BI Service permission: Tenant.ReadWrite.All, for the inventory and Take over.', true],
+    [['Tenant.Read.All'], 'Power BI Service permission: Tenant.Read.All, for the inventory only. Take over needs Tenant.ReadWrite.All in its place.', false],
+    [['Tenant.ReadWrite.All', 'Tenant.Read.All'],
+      'Power BI Service permissions: Tenant.ReadWrite.All and Tenant.Read.All. Tenant.ReadWrite.All already allows everything Tenant.Read.All does, so an administrator can revoke Tenant.Read.All.', true],
+  ] as const)('with the Fabric admin permissions %j, shows them and whether Take over is available', async (permissions, note, available) => {
+    vi.mocked(getAdminSession).mockReturnValue({
+      username: 'synthetic-admin@example.test', tenantId: syntheticTenantId, permissions,
+    });
+    mockLoad.mockResolvedValue(syntheticSnapshot([syntheticConnection({ id: 'target', displayName: 'Synthetic target' })]));
+    render(<App />);
+    expect(screen.getByRole('region', { name: 'Access and deployment context' })).toHaveTextContent(note);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show details for Synthetic target' }));
+    const takeOver = screen.getByRole('button', { name: 'Take over' });
+    if (available) {
+      expect(takeOver).toBeEnabled();
+    } else {
+      expect(takeOver).toBeDisabled();
+      expect(takeOver).toHaveAccessibleDescription('Take over needs the Power BI Service permission Tenant.ReadWrite.All, which this app doesn’t have.');
+      fireEvent.click(takeOver);
+      expect(takeOverConnection).not.toHaveBeenCalled();
+    }
   });
 
   it('cancels a running workspace scan without marking a finished inventory as cancelled', async () => {

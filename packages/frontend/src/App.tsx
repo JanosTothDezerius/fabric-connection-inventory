@@ -10,7 +10,9 @@ import { flushSync } from 'react-dom';
 import {
   ArrowLeft, ArrowRight, Info, LoaderCircle, LogOut, RefreshCw, Search, ShieldCheck, X,
 } from 'lucide-react';
+import { CONNECTION_OWNER_PERMISSION } from '@rayfin-app/shared';
 
+import { AdminPermissionNote } from '@/components/inventory/admin-permission-note';
 import { ConnectionTable } from '@/components/inventory/connection-table';
 import { InventoryHeader } from '@/components/inventory/inventory-header';
 import { InventoryStatus } from '@/components/inventory/inventory-status';
@@ -73,7 +75,7 @@ function App() {
         setError({
           action: 'connect',
           message: failure instanceof Error && failure.name === 'AdminAuthError' ? failure.message :
-            'Admin sign-in did not complete. Allow the Microsoft sign-in popup, use an administrator account in the configured tenant, and try again. An administrator may need to consent to Tenant.Read.All.',
+            'Admin sign-in did not complete. Allow the Microsoft sign-in popup, use a Fabric administrator account in the configured tenant, and try again. An administrator may need to grant this app admin consent first.',
         });
       }
     } finally {
@@ -124,10 +126,10 @@ function App() {
             <ShieldCheck className="icon-size-300 shrink-0" aria-hidden="true" />
             <div className="space-y-200">
               <h2 className="text-400 font-semibold">
-                {!setup.ready ? 'Admin sign-in setup required' : 'Connect a tenant admin account'}
+                {!setup.ready ? 'Admin sign-in setup required' : 'Connect a Fabric administrator account'}
               </h2>
-              <p>Requests use your signed-in account; Fabric enforces tenant-admin permissions. Connecting an account alone does not grant admin access.</p>
-              <p className="font-medium">Read-only permission: <span className="font-monospace">Tenant.Read.All</span></p>
+              <p>Requests use your signed-in account, and Fabric checks its administrator role on every request. Connecting an account alone does not grant admin access.</p>
+              <p className="font-medium">To use this app, sign in with a Fabric administrator account.</p>
             </div>
           </div>
           {!setup.ready ? (
@@ -304,14 +306,12 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
         <section className="inventory-access-note" aria-label="Access and deployment context">
           <ShieldCheck className="icon-size-300 shrink-0" aria-hidden="true" />
           <div className="min-w-0 flex-1 space-y-100">
-            <p>
-              Requests use your signed-in account; Fabric enforces tenant-admin permissions. Read-only <span className="font-monospace">Tenant.Read.All</span>;
-              {' '}Take over also requests <span className="font-monospace">Tenant.ReadWrite.All</span>.
-            </p>
+            <p>Requests use your signed-in account, and Fabric allows them only for Fabric administrators.</p>
+            <AdminPermissionNote permissions={session.permissions} />
             <p className="break-words">Signed-in account: <strong>{session.username || 'Account name not provided'}</strong></p>
             <p className="text-200 text-muted-foreground">
               Hosted in <span className="font-medium">{labels.workspace}</span>. Inventory scope: {labels.tenant}.
-              {' '}If access expires or another account is needed, choose Connect again. Sign-in does not grant tenant-admin rights.
+              {' '}If access expires or another account is needed, choose Connect again. Sign-in does not grant Fabric administrator rights.
             </p>
             <button className="inventory-button mt-200" onClick={onReconnect}>Connect again</button>
           </div>
@@ -421,6 +421,7 @@ function InventoryApp({ session, onDisconnect, onReconnect }: {
             usage={usage}
             takeOver={{
               accountId: session.principalId,
+              available: session.permissions.includes(CONNECTION_OWNER_PERMISSION),
               pending: takeOversPending,
               onTakeOver: (row) => { void takeOver(row); },
             }}

@@ -45,9 +45,10 @@ vi.mock('@azure/msal-browser', () => {
 const tenant = syntheticTenantId;
 const origin = syntheticHostedOrigin;
 const identity = { username: 'admin@example.test', tenantId: tenant, homeAccountId: 'synthetic-home' };
-const token = (tid = tenant, scp = 'Tenant.Read.All') =>
-  `header.${btoa(JSON.stringify({ tid, scp }))}.synthetic-signature`;
+const encode = (claims: Record<string, unknown>) => `header.${btoa(JSON.stringify(claims))}.synthetic-signature`;
+const token = (tid = tenant, scp = 'Tenant.Read.All') => encode({ tid, scp });
 const success = () => ({ account: identity, accessToken: token() });
+const ADMIN_DEFAULT_SCOPE = 'https://api.fabric.microsoft.com/.default';
 
 beforeEach(() => {
   vi.resetModules();
@@ -75,9 +76,9 @@ describe('configured single-tenant delegated authentication', () => {
     expect(msal.acquireTokenSilent).not.toHaveBeenCalled();
   });
 
-  it('uses single-tenant PKCE browser auth, memory cache, and only the tenant read scope', async () => {
+  it('uses single-tenant PKCE browser auth, memory cache, and whichever Fabric admin permission is granted', async () => {
     const auth = await import('./admin-auth');
-    expect(await auth.signInAdmin()).toEqual({ username: identity.username, tenantId: tenant });
+    expect(await auth.signInAdmin()).toEqual({ username: identity.username, tenantId: tenant, permissions: ['Tenant.Read.All'] });
     expect(msal.configure).toHaveBeenCalledWith(expect.objectContaining({
       auth: {
         clientId: syntheticClientId,
@@ -86,9 +87,34 @@ describe('configured single-tenant delegated authentication', () => {
       },
       cache: { cacheLocation: 'memoryStorage' },
     }));
-    expect(msal.loginPopup).toHaveBeenCalledWith({ scopes: [auth.ADMIN_SCOPE], prompt: 'select_account' });
+    expect(msal.loginPopup).toHaveBeenCalledWith({ scopes: [ADMIN_DEFAULT_SCOPE], prompt: 'select_account' });
     expect(await auth.getAdminAccessToken()).toBe(token());
-    expect(msal.acquireTokenSilent).toHaveBeenCalledWith({ account: identity, scopes: [auth.ADMIN_SCOPE] });
+    expect(msal.acquireTokenSilent).toHaveBeenCalledWith({ account: identity, scopes: [ADMIN_DEFAULT_SCOPE] });
+  });
+
+  it('works with Tenant.ReadWrite.All alone, which covers every read, and reports each granted Fabric admin permission', async () => {
+    const oid = '55555555-5555-4555-8555-555555555555';
+    const writeOnly = encode({ tid: tenant, scp: 'Tenant.ReadWrite.All', oid });
+    msal.loginPopup.mockResolvedValue({ account: identity, accessToken: writeOnly });
+    msal.acquireTokenSilent.mockResolvedValue({ account: identity, accessToken: writeOnly });
+    const auth = await import('./admin-auth');
+    expect(await auth.signInAdmin()).toMatchObject({ permissions: ['Tenant.ReadWrite.All'] });
+    expect(await auth.getAdminAccessToken()).toBe(writeOnly);
+    expect(await auth.getPowerBiAdminAccessToken()).toBe(writeOnly);
+    expect(msal.acquireTokenSilent).toHaveBeenLastCalledWith({
+      account: identity, scopes: ['https://analysis.windows.net/powerbi/api/.default'],
+    });
+
+    msal.loginPopup.mockResolvedValue({
+      account: identity, accessToken: encode({ tid: tenant, scp: 'Tenant.Read.All Tenant.ReadWrite.All', oid }),
+    });
+    expect(await auth.signInAdmin()).toMatchObject({ permissions: ['Tenant.ReadWrite.All', 'Tenant.Read.All'] });
+    expect(auth.getAdminSession()).toMatchObject({ permissions: ['Tenant.ReadWrite.All', 'Tenant.Read.All'] });
+    // A token that claims write access is still checked for the tenant.
+    msal.acquireTokenSilent.mockResolvedValueOnce({
+      account: identity, accessToken: encode({ tid: '44444444-4444-4444-8444-444444444444', scp: 'Tenant.ReadWrite.All', oid }),
+    });
+    await expect(auth.getAdminAccessToken()).rejects.toMatchObject({ code: 'WrongTenant' });
   });
 
   it('rejects a wrong-tenant account before showing a connected session', async () => {
@@ -99,17 +125,19 @@ describe('configured single-tenant delegated authentication', () => {
     expect(auth.getAdminSession()).toBeNull();
   });
 
-  it('rejects a valid tenant token without tenant-read consent', async () => {
+  it('rejects a valid tenant token without a Fabric admin permission', async () => {
     msal.loginPopup.mockResolvedValue({ account: identity, accessToken: token(tenant, 'Connection.ReadWrite.All') });
     const auth = await import('./admin-auth');
-    await expect(auth.signInAdmin()).rejects.toMatchObject({ code: 'AdminScopeMissing' });
+    await expect(auth.signInAdmin()).rejects.toMatchObject({
+      code: 'AdminScopeMissing', message: expect.stringMatching(/Tenant\.ReadWrite\.All or Tenant\.Read\.All/),
+    });
     expect(auth.getAdminSession()).toBeNull();
   });
 
   it('uses the same-origin MSAL popup relay for embedded sign-in without changing scope or tenant', async () => {
     vi.stubGlobal('window', { location: { origin }, top: {}, self: {} });
     const auth = await import('./admin-auth');
-    expect(await auth.signInAdmin()).toEqual({ username: identity.username, tenantId: tenant });
+    expect(await auth.signInAdmin()).toEqual({ username: identity.username, tenantId: tenant, permissions: ['Tenant.Read.All'] });
     expect(msal.configure).toHaveBeenCalledWith(expect.objectContaining({
       auth: {
         clientId: syntheticClientId,
@@ -119,7 +147,7 @@ describe('configured single-tenant delegated authentication', () => {
       },
       cache: { cacheLocation: 'memoryStorage' },
     }));
-    expect(msal.loginPopup).toHaveBeenCalledWith({ scopes: [auth.ADMIN_SCOPE], prompt: 'select_account' });
+    expect(msal.loginPopup).toHaveBeenCalledWith({ scopes: [ADMIN_DEFAULT_SCOPE], prompt: 'select_account' });
   });
 
   it('rejects an unregistered origin before opening sign-in', async () => {
@@ -233,38 +261,34 @@ describe('configured single-tenant delegated authentication', () => {
     expect(msal.loginPopup).toHaveBeenCalledOnce();
   });
 
-  it('requests Tenant.ReadWrite.All silently only for Take over, for the signed-in account only', async () => {
-    const { InteractionRequiredAuthError } = await import('@azure/msal-browser');
+  it('uses the inventory token for Take over, only with Tenant.ReadWrite.All and only for the signed-in account', async () => {
     const oid = '55555555-5555-4555-8555-555555555555';
     const signedIn = { ...identity, localAccountId: oid.toUpperCase() };
-    const writeToken = (id: string) =>
-      `header.${btoa(JSON.stringify({ tid: tenant, scp: 'Tenant.Read.All Tenant.ReadWrite.All', oid: id }))}.synthetic-signature`;
-    msal.loginPopup.mockResolvedValue({ account: signedIn, accessToken: token() });
+    const writeToken = (id: string) => encode({ tid: tenant, scp: 'Tenant.ReadWrite.All', oid: id });
+    msal.loginPopup.mockResolvedValue({ account: signedIn, accessToken: writeToken(oid) });
     const auth = await import('./admin-auth');
     await expect(auth.getConnectionWriteAccess()).rejects.toMatchObject({ code: 'AdminSignInRequired' });
-    expect(await auth.signInAdmin()).toEqual({ username: identity.username, tenantId: tenant, principalId: oid });
-    expect(msal.loginPopup).toHaveBeenCalledWith({ scopes: [auth.ADMIN_SCOPE], prompt: 'select_account' });
+    expect(await auth.signInAdmin()).toEqual({
+      username: identity.username, tenantId: tenant, principalId: oid, permissions: ['Tenant.ReadWrite.All'],
+    });
 
     msal.acquireTokenSilent.mockResolvedValueOnce({ account: signedIn, accessToken: writeToken(oid) });
     expect(await auth.getConnectionWriteAccess()).toEqual({ token: writeToken(oid), principalId: oid });
-    expect(msal.acquireTokenSilent).toHaveBeenLastCalledWith({
-      account: signedIn, scopes: ['https://api.fabric.microsoft.com/Tenant.ReadWrite.All'],
-    });
+    expect(msal.acquireTokenSilent).toHaveBeenLastCalledWith({ account: signedIn, scopes: [ADMIN_DEFAULT_SCOPE] });
 
     msal.acquireTokenSilent.mockResolvedValueOnce({
       account: signedIn, accessToken: writeToken('66666666-6666-4666-8666-666666666666'),
     });
     await expect(auth.getConnectionWriteAccess()).rejects.toMatchObject({ code: 'WrongAccount' });
     msal.acquireTokenSilent.mockResolvedValueOnce({ account: signedIn, accessToken: token() });
-    await expect(auth.getConnectionWriteAccess()).rejects.toMatchObject({ code: 'WriteScopeMissing' });
-
-    msal.acquireTokenSilent.mockRejectedValueOnce(new InteractionRequiredAuthError('invalid_grant', 'synthetic-correlation',
-      'AADSTS65001: synthetic-sensitive-error-payload', 'consent_required', '', '', '', '65001'));
-    const missing = auth.getConnectionWriteAccess();
-    await expect(missing).rejects.toMatchObject({
-      code: 'TakeOverPermissionNotGranted', detail: 'AADSTS65001', message: expect.stringContaining('Tenant.ReadWrite.All'),
+    await expect(auth.getConnectionWriteAccess()).rejects.toMatchObject({
+      code: 'TakeOverPermissionNotGranted', detail: 'WriteScopeMissing', message: expect.stringContaining('Tenant.ReadWrite.All'),
     });
-    await expect(missing).rejects.not.toThrow('synthetic-sensitive-error-payload');
+
+    msal.acquireTokenSilent.mockRejectedValueOnce(new Error('synthetic-sensitive-error-payload'));
+    const failure = auth.getConnectionWriteAccess();
+    await expect(failure).rejects.toMatchObject({ code: 'TakeOverTokenUnavailable' });
+    await expect(failure).rejects.not.toThrow('synthetic-sensitive-error-payload');
     expect(msal.loginPopup).toHaveBeenCalledOnce();
   });
 

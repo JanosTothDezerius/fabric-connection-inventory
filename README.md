@@ -1,10 +1,10 @@
 # Fabric Connection Inventory
 
-A Microsoft Fabric App, built with Rayfin, for tenant administrators to
+A Microsoft Fabric App, built with Rayfin, for Fabric administrators to
 enumerate connections, owners, connector and authentication types, endpoint
 paths, and the workloads that depend on each connection, and to take over a
-connection by adding themselves as an owner. Everything except Take over is
-read-only.
+connection by adding themselves as an owner. Only Take over changes anything in
+Fabric; everything else only reads.
 
 This repository is a **single-tenant deployment template**, not a shared
 multitenant service. Each organization deploys its own Fabric App and configures
@@ -32,7 +32,11 @@ connection inventory, or previous deployment records are included.
   owner. A notification at the bottom right reports whether it succeeded, and
   that connection's owners are looked up again and shown immediately, without
   reloading the inventory. Your own owner entries are marked **You**. Take over
-  needs one more permission (see [API permissions](#api-permissions)).
+  needs the Power BI Service permission `Tenant.ReadWrite.All`; with
+  `Tenant.Read.All` instead, the button is shown but unavailable (see
+  [API permissions](#api-permissions)).
+- After sign-in, the app names the Power BI Service permission it has, and flags
+  `Tenant.Read.All` as redundant when `Tenant.ReadWrite.All` is granted too.
 - Clear distinction between empty owner results, failed lookups, and unread rows.
 - Refresh, cancellation, responsive layout, and light/dark themes.
 - Paced requests that pause automatically while Fabric throttles, and owner
@@ -79,7 +83,8 @@ contacts the displayed endpoints.
   administrator who can grant tenant-wide admin consent (Cloud Application
   Administrator, Application Administrator, or Privileged Role Administrator)
   for the [API permissions](#api-permissions) below.
-- A Fabric administrator account to use the tenant admin APIs.
+- A Fabric administrator account to sign in with. The app uses Fabric's admin
+  APIs, which only Fabric administrators can call.
 
 ## Deploy in your tenant
 
@@ -115,10 +120,11 @@ go to **Entra ID** > **App registrations**:
    organizational directory only**, and under **Redirect URI** select
    **Single-page application (SPA)** with this exact URI, using the hosting
    origin from step 1: `https://<your-app-host>/admin-auth.html`.
-2. Open **API permissions** > **Add a permission** and add each **delegated**
-   permission in the [table below](#api-permissions). Remove permissions the app
-   doesn't use, such as Microsoft Graph `User.Read`, which new registrations get
-   by default.
+2. Open **API permissions** > **Add a permission** and add the **delegated**
+   permissions from the [table below](#api-permissions): one Power BI Service
+   permission, and a Microsoft Graph permission for each type of owner whose
+   names you want to see. Remove permissions the app doesn't use, such as
+   Microsoft Graph `User.Read`, which new registrations get by default.
 3. Have an administrator select **Grant admin consent for [your tenant]** and
    confirm. Every permission's **Status** must then show
    **Granted for [your tenant]**. Repeat this whenever you add a permission.
@@ -131,45 +137,59 @@ flow with PKCE.
 
 #### API permissions
 
+The app needs one Power BI Service permission, which also decides whether Take
+over is available. Each Microsoft Graph permission is optional and only adds the
+names of one type of owner.
+
 | API | Delegated permission | Required | Used for |
 |---|---|---|---|
-| Power BI Service | `Tenant.Read.All` | **Yes** | Listing connections and their owners (Fabric admin APIs) and finding dependent workloads (admin workspace scanner) |
+| Power BI Service | `Tenant.ReadWrite.All` | **Yes**, or `Tenant.Read.All` in its place | Listing connections and their owners and adding you as an owner with **Take over** (Fabric admin APIs), and finding dependent workloads (admin workspace scanner) |
+| Power BI Service | `Tenant.Read.All` | Only in place of `Tenant.ReadWrite.All`, for a deployment without Take over | The same, except **Take over** |
 | Microsoft Graph | `User.ReadBasic.All` | For user names | Reads the display name, user principal name, and email address of users that own connections |
 | Microsoft Graph | `GroupMember.Read.All` | For group names | Reads the display name and email address of security groups that own connections |
 | Microsoft Graph | `Application.Read.All` | For service principal names | Reads the display name and application ID of service principals, such as app registrations, managed identities, and workspace identities, that own connections |
-| Power BI Service | `Tenant.ReadWrite.All` | For Take over | Adds your signed-in account as an owner of a connection (Fabric admin API) when you select **Take over** |
 
+- **Grant exactly one Power BI Service permission, never both.**
+  `Tenant.ReadWrite.All` is the only permission Fabric accepts for adding a
+  connection owner as an administrator, and every admin API the app reads also
+  accepts it. Every token the app receives for the Power BI Service carries all
+  Power BI Service permissions granted to the registration, so once
+  `Tenant.ReadWrite.All` is granted, `Tenant.Read.All` adds nothing. For an
+  inventory without Take over, grant only `Tenant.Read.All`: the app then can't
+  change anything in Fabric, and the **Take over** button stays unavailable.
 - **Every permission needs admin consent**, including `User.ReadBasic.All`.
   The portal's **Admin consent required** column shows **No** for that
   permission, but that only means users could consent for themselves. The app
-  never shows a consent prompt, so without admin consent the permission isn't
-  granted. Check the **Status** column instead: it must show
-  **Granted for [your tenant]**.
+  requests Microsoft Graph tokens silently and never asks users to consent, so
+  without admin consent the permission isn't granted. Check the **Status**
+  column instead: it must show **Granted for [your tenant]**.
 - Add only delegated permissions; the app never uses application permissions.
   Prefer these least-privileged permissions to broader ones such as
   `Directory.Read.All`: every Microsoft Graph token the app receives carries all
   Graph permissions granted to this registration. If an administrator already
-  granted a broader permission, the app uses it.
+  granted a broader permission, the app uses it. For group names,
+  `GroupMember.Read.All` is the narrowest permission Microsoft documents. It can
+  also read group memberships, which the app never requests.
 - Users, security groups, and service principals are looked up separately.
   Without one type's permission, only owners of that type show IDs, and a notice
   lists each missing permission with its purpose. Names of the other types, the
   inventory, and dependent workloads still work.
-- One `Tenant.Read.All` grant covers both tokens the app requests from the Power
-  BI Service API: `https://api.fabric.microsoft.com/Tenant.Read.All` at sign-in,
-  for connections and owners, and
-  `https://analysis.windows.net/powerbi/api/Tenant.Read.All` afterwards, for the
-  workspace scanner. Sign-in also requests the standard OpenID Connect sign-in
-  and renewal scopes, which need no entry in the table. For owner names the app
-  requests each Graph permission separately, such as
-  `https://graph.microsoft.com/User.ReadBasic.All`, and checks
-  `https://graph.microsoft.com/.default` for a broader permission granted
-  instead. Requests after sign-in are silent and never open a sign-in window.
-- `Tenant.ReadWrite.All` is needed only for **Take over**. Sign-in never asks
-  for it: the app requests `https://api.fabric.microsoft.com/Tenant.ReadWrite.All`
-  silently when you select **Take over**. Without it, everything else works and
-  Take over reports the missing permission (error code `AADSTS65001`). As a
-  delegated permission it only lets the app act as the signed-in account, and
-  Fabric still requires that account to be a Fabric administrator.
+- For the Power BI Service, sign-in requests
+  `https://api.fabric.microsoft.com/.default`, for connections, owners and Take
+  over, and the workspace scanner then requests
+  `https://analysis.windows.net/powerbi/api/.default`. Both return whichever
+  Power BI Service permission is granted. Microsoft sign-in asks for consent only
+  when none of the registration's Power BI Service permissions is granted yet, so
+  a permission you add later waits for admin consent without blocking sign-in.
+  Sign-in also requests the standard OpenID Connect sign-in and renewal scopes,
+  which need no entry in the table. For owner names the app requests each Graph
+  permission separately, such as `https://graph.microsoft.com/User.ReadBasic.All`,
+  and checks `https://graph.microsoft.com/.default` for a broader permission
+  granted instead. Requests after sign-in are silent and never open a sign-in
+  window.
+- A delegated permission only lets the app act as the signed-in account.
+  Fabric still requires that account to be a Fabric administrator, and the app
+  uses `Tenant.ReadWrite.All` only to add that account as a connection owner.
 
 Consent doesn't make anyone an administrator. Fabric checks on each request that
 the signed-in account is a Fabric administrator, and Microsoft Graph returns only
@@ -223,13 +243,19 @@ A fully configured app shows:
    use it under **Dependent workloads**.
 3. Owner names above their IDs, with no **Owner names unavailable** or **Some
    owner names can't be shown** notice.
+4. Above the summary, the Power BI Service permission the app has:
+   **`Tenant.ReadWrite.All`, for the inventory and Take over**, or
+   **`Tenant.Read.All`, for the inventory only**. If the note says an
+   administrator can revoke `Tenant.Read.All`, both are granted; remove
+   `Tenant.Read.All` as in
+   [Updating an existing deployment](#updating-an-existing-deployment).
 
 #### Troubleshooting permissions
 
 | What you see | Cause | Fix |
 |---|---|---|
-| Microsoft sign-in asks for consent or admin approval, or **Admin sign-in did not grant Tenant.Read.All** | Power BI `Tenant.Read.All` is missing or has no admin consent | Add it, grant admin consent (step 2), then choose **Connect admin account** again |
-| **Access denied. Your signed-in account must be a Fabric administrator…**, or **Dependent workloads could not be determined** with error code `PowerBiHttp403` | The account isn't a Fabric administrator, or `Tenant.Read.All` has no admin consent | Choose **Connect again** with a Fabric administrator, or grant the consent |
+| Microsoft sign-in asks for consent or admin approval, or **Admin sign-in did not grant the delegated Power BI Service permission Tenant.ReadWrite.All or Tenant.Read.All** | The app registration has no Power BI Service permission with admin consent | Add one (step 2), have an administrator grant admin consent, then choose **Connect admin account** again |
+| **Access denied. Your signed-in account must be a Fabric administrator…**, or **Dependent workloads could not be determined** with error code `PowerBiHttp403` | The account isn't a Fabric administrator, or the Power BI Service permission has no admin consent | Choose **Connect again** with a Fabric administrator, or grant the consent |
 | **Owner names unavailable** or **Some owner names can't be shown**, listing permissions with error code `AADSTS65001` | Each listed Microsoft Graph permission is missing from the app registration or has no admin consent. **Admin consent required: No** in the portal doesn't mean granted | Add the listed permissions, have an administrator select **Grant admin consent**, check that each **Status** shows **Granted**, then select **Retry name lookups** |
 | A listed permission with error code `GraphHttp403` | Microsoft Graph refused to read that type with the permissions granted | Grant the listed permission, then select **Retry name lookups** |
 | **Names of … couldn't be looked up**, with an error code such as `AADSTS50076` | Microsoft Graph didn't issue a token for that type, for example because the session needs multifactor authentication again | Select **Retry name lookups**; if it continues, choose **Connect again** |
@@ -237,7 +263,8 @@ A fully configured app shows:
 | An owner marked **Name not readable with this app's permissions** | Microsoft Graph refused to read that one principal | Select **Retry name lookups** |
 | An owner marked **Name lookup failed** | A temporary Microsoft Graph error | **Refresh inventory** looks the name up again |
 | Only in the deployed app: **Dependent workloads could not be determined** with error code `NetworkError`, or owners marked **Name lookup failed** | The host's Content-Security-Policy, if it sets one, blocks these APIs | Allow `https://api.powerbi.com` and `https://graph.microsoft.com` in its `connect-src` |
-| **Take over failed** with error code `AADSTS65001` | Power BI `Tenant.ReadWrite.All` is missing from the app registration or has no admin consent | Add it, have an administrator grant admin consent (step 2), then select **Take over** again; you don't need to sign in again |
+| **Take over** is unavailable, saying it **needs the Power BI Service permission Tenant.ReadWrite.All** | The app registration grants `Tenant.Read.All` instead | Grant `Tenant.ReadWrite.All` in its place, as in [Updating an existing deployment](#updating-an-existing-deployment), then choose **Connect again** |
+| The access note says **an administrator can revoke Tenant.Read.All** | Both Power BI Service permissions are granted, and `Tenant.ReadWrite.All` already allows everything `Tenant.Read.All` does | Remove and revoke `Tenant.Read.All` as in [Updating an existing deployment](#updating-an-existing-deployment) |
 | **Take over failed** with error code `FabricHttp403` | The account isn't a Fabric administrator, or Fabric refused the change | Choose **Connect again** with a Fabric administrator |
 | **Take over failed** with another error code, such as `FabricHttp409` or a Fabric error code | Fabric didn't accept the change, for example because your account already has another role on the connection | Check the connection in Fabric's **Manage connections and gateways**; the notification shows the request ID for investigation |
 | **Take over failed** saying it isn't known whether you were added | The request timed out or the network failed | Select **Refresh inventory** and check the connection's owners before trying again |
@@ -253,11 +280,22 @@ If you deployed an earlier version:
 
 1. If it showed only owner IDs and no dependent workloads, add the Microsoft
    Graph permissions you need from [API permissions](#api-permissions) and grant
-   admin consent. Your existing Power BI `Tenant.Read.All` consent already covers
-   dependent workloads.
-2. To use **Take over**, add the delegated Power BI Service permission
-   `Tenant.ReadWrite.All` and grant admin consent. Without it, everything else
-   works as before.
+   admin consent. Your Power BI Service permission already covers dependent
+   workloads.
+2. To use **Take over**, replace `Tenant.Read.All` with `Tenant.ReadWrite.All`.
+   The app needs only one of them, and `Tenant.ReadWrite.All` includes
+   everything `Tenant.Read.All` allows:
+   1. In **App registrations** > your app > **API permissions**, add the
+      delegated Power BI Service permission `Tenant.ReadWrite.All`, and have an
+      administrator select **Grant admin consent**. Sign-in keeps working while
+      consent is pending.
+   2. Select **…** next to `Tenant.Read.All` > **Remove permission**.
+   3. Removing a permission doesn't revoke its consent, and tokens keep carrying
+      every consented permission. In **Enterprise applications** > your app >
+      **Permissions** > **Admin consent**, select **…** next to
+      `Tenant.Read.All` > **Revoke permission**.
+   4. In the app, choose **Connect again**. The access note then names only
+      `Tenant.ReadWrite.All`.
 3. Rebuild and redeploy with the commands in step 3, then verify as in step 4.
 
 No new redirect URIs, `.env` settings, or `rayfin/rayfin.yml` changes are needed.
@@ -295,7 +333,9 @@ Fabric, Power BI, and Microsoft Graph requests use **each signed-in user's
 delegated token**, not an app-owner token or a service principal. Database,
 storage, and Functions services are disabled. **Take over** adds exactly one
 owner, the account signed in to the app (the object ID in its token), and never
-adds another principal or changes existing role assignments.
+adds another principal or changes existing role assignments. With
+`Tenant.Read.All` in place of `Tenant.ReadWrite.All`, the app can't change
+anything in Fabric.
 
 MSAL holds the administrator session in memory only. Reloading may require a new
 explicit connection. Disconnect immediately clears the inventory and the app's
@@ -376,8 +416,10 @@ snapshot; connections may change during enumeration.
   preview. Fabric records an administrator added this way as a pending owner
   (`PendingOwner`) until they update the connection's credentials, which makes
   them an owner. The button is unavailable while you own the connection or are
-  its pending owner. After a take over, only that connection's owners are looked
-  up again; **Refresh inventory** shows the latest owners of every connection.
+  its pending owner, and when the app has `Tenant.Read.All` in place of
+  `Tenant.ReadWrite.All`. After a take over, only that connection's owners are
+  looked up again; **Refresh inventory** shows the latest owners of every
+  connection.
 - Missing display names and metadata are marked explicitly.
 - Partial results remain visibly incomplete. Unread or failed owner lookups never
   appear as successful empty results.
@@ -437,4 +479,6 @@ its copyright and license notices. See [LICENSE](LICENSE).
 - [Microsoft Graph JSON batching](https://learn.microsoft.com/en-us/graph/json-batching)
 - [Microsoft Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference)
 - [Grant tenant-wide admin consent](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/grant-admin-consent)
+- [Review and revoke permissions granted to an app](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/manage-application-permissions)
+- [The `.default` scope](https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc#the-default-scope)
 - [Microsoft Entra SPA configuration](https://learn.microsoft.com/en-us/entra/identity-platform/scenario-spa-app-configuration)

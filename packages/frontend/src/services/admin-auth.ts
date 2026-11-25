@@ -3,9 +3,9 @@ import {
   type AccountInfo, type AuthenticationResult,
 } from '@azure/msal-browser';
 import {
-  CONNECTION_OWNER_PERMISSION, DIRECTORY_READ_PERMISSIONS, InventoryError, directoryTokenScopes, requireDirectoryToken,
-  requireTenantAdminToken, requireTenantWriteToken,
-  type DirectoryKind, type TenantWriteAccess,
+  ADMIN_READ_PERMISSION, CONNECTION_OWNER_PERMISSION, DIRECTORY_READ_PERMISSIONS, InventoryError, directoryTokenScopes,
+  requireDirectoryToken, requireTenantAdminToken, requireTenantWriteToken, tenantPermissions,
+  type DirectoryKind, type TenantPermission, type TenantWriteAccess,
 } from '@rayfin-app/shared';
 import { AdminConfigError, readAdminConfig, type AdminConfig } from './admin-config';
 
@@ -14,6 +14,11 @@ export interface AdminSession {
   tenantId: string;
   /** Lower-case Microsoft Entra object ID of the signed-in account, when its ID token provides one. */
   principalId?: string;
+  /**
+   * The Fabric admin permissions granted to this app, from the sign-in token: Tenant.ReadWrite.All, which also
+   * allows every read and Take over, or Tenant.Read.All.
+   */
+  permissions: readonly TenantPermission[];
 }
 
 export class AdminAuthError extends Error {
@@ -24,11 +29,14 @@ export class AdminAuthError extends Error {
   }
 }
 
-export const ADMIN_SCOPE = 'https://api.fabric.microsoft.com/Tenant.Read.All';
-/** Lets a Fabric administrator add connection owners. Requested only when Take over is used, never at sign-in. */
-export const ADMIN_WRITE_SCOPE = `https://api.fabric.microsoft.com/${CONNECTION_OWNER_PERMISSION}`;
-/** The same consented Tenant.Read.All permission, with the audience of the Power BI admin scanner API. */
-export const POWER_BI_ADMIN_SCOPE = 'https://analysis.windows.net/powerbi/api/Tenant.Read.All';
+/**
+ * Every Power BI Service permission granted to this app, for the Fabric admin APIs. The app needs only one of them:
+ * Tenant.ReadWrite.All, or Tenant.Read.All without Take over. `.default` returns whichever is granted, and asks for
+ * consent only when none is.
+ */
+export const ADMIN_SCOPE = 'https://api.fabric.microsoft.com/.default';
+/** The same Power BI Service permissions, with the audience of the Power BI admin scanner API. */
+export const POWER_BI_ADMIN_SCOPE = 'https://analysis.windows.net/powerbi/api/.default';
 const GRAPH_RESOURCE = 'https://graph.microsoft.com';
 /** Every delegated Microsoft Graph permission granted to this app; used when a kind's own permission isn't granted. */
 export const DIRECTORY_SCOPE = `${GRAPH_RESOURCE}/.default`;
@@ -39,6 +47,7 @@ export function directoryScope(kind: DirectoryKind): string {
 }
 let client: Promise<PublicClientApplication> | undefined;
 let account: AccountInfo | null = null;
+let grantedPermissions: readonly TenantPermission[] = [];
 let generation = 0;
 
 function getClient(config: AdminConfig): Promise<PublicClientApplication> {
@@ -68,12 +77,31 @@ function getClient(config: AdminConfig): Promise<PublicClientApplication> {
   return client;
 }
 
-function validateResult(result: AuthenticationResult, config: AdminConfig): AccountInfo {
+/**
+ * Checks a Power BI Service token for the configured tenant and returns the Fabric admin permissions it grants.
+ * Tenant.ReadWrite.All also allows every read, so a token with it is checked by the write guard; any other token
+ * must grant Tenant.Read.All.
+ */
+function adminPermissions(token: string, tenantId: string): TenantPermission[] {
+  const permissions = tenantPermissions(token);
+  try {
+    if (permissions.includes(CONNECTION_OWNER_PERMISSION)) requireTenantWriteToken(token, tenantId);
+    else requireTenantAdminToken(() => token, tenantId);
+  } catch (error) {
+    if (error instanceof InventoryError && error.failure.code === 'AdminScopeMissing') {
+      throw new AdminAuthError('AdminScopeMissing',
+        `Admin sign-in did not grant the delegated Power BI Service permission ${CONNECTION_OWNER_PERMISSION} or ${ADMIN_READ_PERMISSION}. An administrator must grant one of them to this app with admin consent.`);
+    }
+    throw error;
+  }
+  return permissions;
+}
+
+function validateResult(result: AuthenticationResult, config: AdminConfig): { account: AccountInfo; permissions: TenantPermission[] } {
   if (!result.account || result.account.tenantId.toLowerCase() !== config.tenantId) {
     throw new AdminAuthError('WrongTenant', 'Connect an administrator account in the configured tenant.');
   }
-  requireTenantAdminToken(() => result.accessToken, config.tenantId);
-  return result.account;
+  return { account: result.account, permissions: adminPermissions(result.accessToken, config.tenantId) };
 }
 
 function authFailure(error: unknown): AdminAuthError {
@@ -98,7 +126,9 @@ function accountObjectId(value: AccountInfo): string | undefined {
 }
 
 function session(value: AccountInfo): AdminSession {
-  return { username: value.username, tenantId: value.tenantId, principalId: accountObjectId(value) };
+  return {
+    username: value.username, tenantId: value.tenantId, principalId: accountObjectId(value), permissions: grantedPermissions,
+  };
 }
 
 export function getAdminSession(): AdminSession | null {
@@ -122,7 +152,9 @@ export async function signInAdmin(): Promise<AdminSession> {
       await instance.clearCache();
       throw new AdminAuthError('SignInCancelled', 'This sign-in was superseded. Connect again when ready.');
     }
-    account = validateResult(result, config);
+    const validated = validateResult(result, config);
+    account = validated.account;
+    grantedPermissions = validated.permissions;
     instance.setActiveAccount(account);
     return session(account);
   } catch (error) {
@@ -155,7 +187,7 @@ async function acquireSilently(scope: string, forceRefresh: boolean): Promise<{ 
   return { result, config };
 }
 
-/** A token for the Power BI admin scanner API, which uses the same consented Tenant.Read.All permission. */
+/** A token for the Power BI admin scanner API, which uses the same Power BI Service permission as the Fabric admin APIs. */
 export async function getPowerBiAdminAccessToken(): Promise<string> {
   try {
     const { result, config } = await acquireSilently(POWER_BI_ADMIN_SCOPE, false);
@@ -240,17 +272,28 @@ export async function getDirectoryAccessToken(kind: DirectoryKind, forceRefresh 
 }
 
 /**
- * A token that lets the signed-in Fabric administrator add themselves as a connection owner, with the
- * account's object ID. It is requested only when a take over starts, silently, and never opens a sign-in
- * window. Throws AdminAuthError `TakeOverPermissionNotGranted` when Tenant.ReadWrite.All has no consent.
+ * The access token for adding the signed-in Fabric administrator as a connection owner, with the account's object ID.
+ * It's the token the inventory uses, which grants Tenant.ReadWrite.All when the app has it, so Take over never asks
+ * for another permission or opens a sign-in window. Throws AdminAuthError `TakeOverPermissionNotGranted` when the
+ * app has only Tenant.Read.All.
  */
 export async function getConnectionWriteAccess(): Promise<TenantWriteAccess> {
   try {
-    const { result, config } = await acquireSilently(ADMIN_WRITE_SCOPE, false);
+    const { result, config } = await acquireSilently(ADMIN_SCOPE, false);
     if (!result.account || result.account.tenantId.toLowerCase() !== config.tenantId) {
       throw new AdminAuthError('WrongTenant', 'Connect an administrator account in the configured tenant.');
     }
-    const access = requireTenantWriteToken(result.accessToken, config.tenantId);
+    let access: TenantWriteAccess;
+    try {
+      access = requireTenantWriteToken(result.accessToken, config.tenantId);
+    } catch (error) {
+      if (error instanceof InventoryError && error.failure.code === 'WriteScopeMissing') {
+        throw new AdminAuthError('TakeOverPermissionNotGranted',
+          `This app doesn’t have the delegated Power BI Service permission ${CONNECTION_OWNER_PERMISSION}, which Take over needs.`,
+          'WriteScopeMissing');
+      }
+      throw error;
+    }
     // Only the account signed in to this app may become an owner.
     const signedIn = account ? accountObjectId(account) : undefined;
     if (signedIn && signedIn !== access.principalId) {
@@ -258,14 +301,11 @@ export async function getConnectionWriteAccess(): Promise<TenantWriteAccess> {
     }
     return access;
   } catch (error) {
-    if (error instanceof AdminAuthError || error instanceof AdminConfigError || error instanceof InventoryError) {
+    if (error instanceof AdminAuthError || error instanceof AdminConfigError || error instanceof InventoryError ||
+        error instanceof InteractionRequiredAuthError) {
       throw authFailure(error);
     }
     const code = errorCodeOf(error);
-    if (consentMissing(error)) {
-      throw new AdminAuthError('TakeOverPermissionNotGranted',
-        `The delegated Power BI Service permission ${CONNECTION_OWNER_PERMISSION} has not been granted to this app with admin consent (${code}).`, code);
-    }
     throw new AdminAuthError('TakeOverTokenUnavailable',
       `Microsoft Entra ID did not issue a token for Take over (${code}). Retry; if this continues, choose Connect again.`, code);
   }
@@ -274,6 +314,7 @@ export async function getConnectionWriteAccess(): Promise<TenantWriteAccess> {
 export async function disconnectAdmin(): Promise<void> {
   generation++;
   account = null;
+  grantedPermissions = [];
   if (client) {
     const instance = await client;
     instance.setActiveAccount(null);

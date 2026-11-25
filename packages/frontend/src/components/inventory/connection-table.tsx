@@ -16,6 +16,8 @@ export interface UsageView {
 export interface TakeOverView {
   /** Lower-case object ID of the signed-in account, when known. */
   accountId?: string;
+  /** The app has Tenant.ReadWrite.All, which Take over needs. */
+  available: boolean;
   /** IDs of the connections with a take over in progress. */
   pending: ReadonlySet<string>;
   onTakeOver: (row: ConnectionRow) => void;
@@ -154,7 +156,8 @@ function TakeOverAction({ row, takeOver }: { row: ConnectionRow; takeOver: TakeO
   const note = busy ? 'Adding your account as an owner…' :
     own?.role === 'Owner' ? 'You already own this connection.' :
       own ? 'You’re a pending owner. Update the connection’s credentials to make your ownership effective.' :
-        'Adds your signed-in account as an owner. Existing owners are kept.';
+        !takeOver.available ? 'Take over needs the Power BI Service permission Tenant.ReadWrite.All, which this app doesn’t have.' :
+          'Adds your signed-in account as an owner. Existing owners are kept.';
 
   return (
     <div className="inventory-take-over">
@@ -162,7 +165,7 @@ function TakeOverAction({ row, takeOver }: { row: ConnectionRow; takeOver: TakeO
       <button
         className="inventory-button inventory-button-primary"
         onClick={() => takeOver.onTakeOver(row)}
-        disabled={busy || own !== undefined}
+        disabled={busy || own !== undefined || !takeOver.available}
         aria-describedby={noteId}
       >
         {busy ? <LoaderCircle className="icon-size-200 motion-safe:animate-spin" aria-hidden="true" /> :

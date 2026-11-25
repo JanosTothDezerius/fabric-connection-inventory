@@ -134,7 +134,7 @@ export class WorkspaceScanner extends PacedApiClient {
 
   protected override failureMessage(status: number): string {
     return status === 403 ?
-      'Access to the admin workspace scanner was denied. Your signed-in account must be a Fabric administrator and have delegated Tenant.Read.All consent for this app.' :
+      'Access to the admin workspace scanner was denied. Your signed-in account must be a Fabric administrator, and this app needs delegated Tenant.ReadWrite.All or Tenant.Read.All consent.' :
       status === 401 ? 'Power BI rejected the resource token. Check its audience, expiry, and consent.' :
       status === 404 ? 'The workspace scan was not found. Scan results expire after 24 hours; scan again.' :
       status === 503 ? 'Power BI remained unavailable after bounded retries.' :

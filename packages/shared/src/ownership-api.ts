@@ -6,8 +6,16 @@ const EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
 /** Fabric error codes are identifiers, such as UnsupportedPrincipalType; other values are not shown. */
 const FABRIC_ERROR_CODE = /^[A-Za-z][A-Za-z0-9_.]{0,99}$/;
 
-/** The delegated Power BI Service permission that lets a Fabric administrator add connection owners. */
+/** The delegated Power BI Service permission that lets a Fabric administrator use the admin APIs read-only. */
+export const ADMIN_READ_PERMISSION = 'Tenant.Read.All';
+/**
+ * The delegated Power BI Service permission that lets a Fabric administrator add connection owners. Every admin
+ * API the app reads also accepts it, so it replaces Tenant.Read.All rather than adding to it.
+ */
 export const CONNECTION_OWNER_PERMISSION = 'Tenant.ReadWrite.All';
+
+export type TenantPermission = typeof ADMIN_READ_PERMISSION | typeof CONNECTION_OWNER_PERMISSION;
+const TENANT_PERMISSIONS: readonly TenantPermission[] = [CONNECTION_OWNER_PERMISSION, ADMIN_READ_PERMISSION];
 
 /** A delegated token that can add connection owners, and the account it was issued to. */
 export interface TenantWriteAccess {
@@ -26,6 +34,13 @@ function claims(token: string): Record<string, unknown> {
     throw new InventoryError({ code: 'InvalidResourceToken', message: 'The Fabric resource token could not be inspected for the configured tenant guard.' });
   }
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/** The Fabric admin permissions in a token's scp claim, Tenant.ReadWrite.All first. The token isn't validated. */
+export function tenantPermissions(token: string): TenantPermission[] {
+  const { scp } = claims(token);
+  const scopes = typeof scp === 'string' ? scp.split(/\s+/) : [];
+  return TENANT_PERMISSIONS.filter((permission) => scopes.includes(permission));
 }
 
 /**

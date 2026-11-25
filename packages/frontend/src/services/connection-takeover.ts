@@ -29,7 +29,7 @@ function accessFailure(error: unknown): ApiFailure {
   }
   return error.code === 'TakeOverPermissionNotGranted' ? {
     code: error.detail ?? error.code,
-    message: 'This app registration doesn’t have the delegated Power BI Service permission Tenant.ReadWrite.All with admin consent. Add it under API permissions and have an administrator grant admin consent, then try again.',
+    message: 'Take over needs the delegated Power BI Service permission Tenant.ReadWrite.All, which this app doesn’t have. An administrator can grant it in place of Tenant.Read.All, with admin consent; then choose Connect again.',
   } : { code: error.code, message: error.message };
 }
 

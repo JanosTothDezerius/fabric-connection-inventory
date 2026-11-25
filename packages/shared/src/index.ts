@@ -19,7 +19,8 @@ export {
   type DirectoryKind, type DirectoryLookupResult, type PrincipalLookup, type PrincipalReference,
 } from './directory-api.js';
 export {
-  CONNECTION_OWNER_PERMISSION, ConnectionOwnership, requireTenantWriteToken, type TenantWriteAccess,
+  ADMIN_READ_PERMISSION, CONNECTION_OWNER_PERMISSION, ConnectionOwnership, requireTenantWriteToken, tenantPermissions,
+  type TenantPermission, type TenantWriteAccess,
 } from './ownership-api.js';
 
 export interface ApiFailure {
