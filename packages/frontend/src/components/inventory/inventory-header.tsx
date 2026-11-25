@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Database, LockKeyhole, Moon, Sun } from 'lucide-react';
+import { Database, Moon, Sun } from 'lucide-react';
 
 import { useThemeContext } from '@/hooks/theme.context';
 import { getInventoryLabels } from '@/services/admin-config';
@@ -19,9 +19,6 @@ export function InventoryHeader({ children }: { children?: ReactNode }) {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-300">
-          <span className="inventory-badge">
-            <LockKeyhole className="icon-size-100" aria-hidden="true" /> Read-only
-          </span>
           {children}
           <button
             className="inventory-icon-button"

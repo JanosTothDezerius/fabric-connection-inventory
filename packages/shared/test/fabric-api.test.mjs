@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_THROTTLE_WAIT_MS, FabricInventory, InventoryError, connection, delay, requireTenantAdminToken, safeResult,
 } from '../dist/fabric-api.js';
+import { ConnectionOwnership, requireTenantWriteToken } from '../dist/ownership-api.js';
 
 const first = '11111111-1111-4111-8111-111111111111';
 const second = '22222222-2222-4222-8222-222222222222';
@@ -61,6 +62,10 @@ test('malformed response fails rather than looking like an empty tenant', async 
   const result = await safeResult(() => new FabricInventory('synthetic', async () => json({ unexpected: [] })).listConnections(''));
   assert.equal(result.ok, false);
   assert.equal(result.error.code, 'InvalidApiResponse');
+  for (const empty of [() => new Response(null, { status: 200 }), () => new Response('', { status: 200 })]) {
+    const blank = await safeResult(() => new FabricInventory('synthetic', async () => empty()).listConnections(''));
+    assert.equal(blank.error.code, 'InvalidApiResponse');
+  }
 });
 
 test('does not bind native browser fetch to the inventory class instance', async () => {
@@ -262,4 +267,69 @@ test('requires delegated Tenant.Read.All instead of application roles or write-o
     (error) => error.failure.code === 'DelegatedTokenRequired');
   assert.throws(() => requireTenantAdminToken(() => encode({ tid: tenant, scp: 'Tenant.ReadWrite.All' }), tenant),
     (error) => error.failure.code === 'AdminScopeMissing');
+});
+
+test('take over adds exactly the signed-in user as owner through the admin API', async () => {
+  const requests = [];
+  const api = new ConnectionOwnership('synthetic', async (url, options) => {
+    requests.push({ url, options });
+    return Response.json({ id: second, principal: { id: second, type: 'User' }, role: 'PendingOwner' }, { status: 201 });
+  });
+  const created = await api.addUserOwner(first, second);
+  assert.equal(requests.length, 1);
+  assert.equal(new URL(requests[0].url).pathname, `/v1/admin/connections/${first}/roleAssignments`);
+  assert.equal(requests[0].options.method, 'POST');
+  assert.equal(requests[0].options.redirect, 'error');
+  assert.deepEqual(JSON.parse(requests[0].options.body), { principal: { id: second, type: 'User' }, role: 'Owner' });
+  assert.equal(created.id, second);
+  assert.equal(created.role, 'PendingOwner');
+});
+
+test('a take over that Fabric confirms without readable details still succeeds', async () => {
+  for (const response of [
+    () => new Response(null, { status: 201 }),
+    () => json({ unexpected: true }),
+    () => json({ principal: { id: third, type: 'User' }, role: 'Owner' }),
+  ]) {
+    assert.equal(await new ConnectionOwnership('synthetic', async () => response()).addUserOwner(first, second), undefined);
+  }
+});
+
+test('take over failures report the Fabric error code, status and request ID without retrying', async () => {
+  let count = 0;
+  const api = new ConnectionOwnership('synthetic', async () => {
+    count++;
+    return Response.json({ errorCode: 'UnsupportedPrincipalType', message: 'Synthetic server text', requestId: third }, { status: 400 });
+  });
+  const result = await safeResult(() => api.addUserOwner(first, second));
+  assert.equal(count, 1);
+  assert.equal(result.error.code, 'UnsupportedPrincipalType');
+  assert.equal(result.error.status, 400);
+  assert.equal(result.error.requestId, third);
+  assert.ok(!result.error.message.includes('Synthetic server text'));
+
+  const denied = await safeResult(() => new ConnectionOwnership('synthetic', async () =>
+    Response.json({ errorCode: '<script>', message: 'Synthetic' }, { status: 403 })).addUserOwner(first, second));
+  assert.equal(denied.error.code, 'FabricHttp403');
+  assert.match(denied.error.message, /Fabric administrator.*Tenant\.ReadWrite\.All/);
+  await assert.rejects(() => api.addUserOwner('../anything', second), (error) => error.failure.code === 'InvalidInput');
+  await assert.rejects(() => api.addUserOwner(first, 'not-a-user'), (error) => error.failure.code === 'InvalidInput');
+  assert.equal(count, 1);
+});
+
+test('the take-over token guard requires delegated Tenant.ReadWrite.All in the tenant and returns the account ID', () => {
+  const encode = (claims) => `header.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.signature`;
+  const oid = '55555555-5555-4555-8555-555555555555';
+  const valid = encode({ tid: tenant, scp: 'Tenant.Read.All Tenant.ReadWrite.All', oid: oid.toUpperCase() });
+  assert.deepEqual(requireTenantWriteToken(valid, tenant), { token: valid, principalId: oid });
+  for (const [claims, code] of [
+    [{ tid: second, scp: 'Tenant.ReadWrite.All', oid }, 'WrongTenant'],
+    [{ tid: tenant, roles: ['Tenant.ReadWrite.All'], oid }, 'DelegatedTokenRequired'],
+    [{ tid: tenant, scp: 'Tenant.Read.All', oid }, 'WriteScopeMissing'],
+    [{ tid: tenant, scp: 'Tenant.ReadWrite.All' }, 'AccountIdUnavailable'],
+  ]) {
+    assert.throws(() => requireTenantWriteToken(encode(claims), tenant), (error) => error.failure.code === code);
+  }
+  assert.throws(() => requireTenantWriteToken(valid, '00000000-0000-0000-0000-000000000000'),
+    (error) => error.failure.code === 'InvalidTenantConfiguration');
 });

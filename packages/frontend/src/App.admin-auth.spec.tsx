@@ -30,6 +30,7 @@ const mockUsage = vi.mocked(loadConnectionUsage);
 const syntheticAdmin: AdminSession = {
   username: 'synthetic-admin@example.test',
   tenantId: syntheticTenantId,
+  permissions: ['Tenant.ReadWrite.All'],
 };
 
 function deferred<T>() {
@@ -59,6 +60,8 @@ describe('Dedicated admin sign-in gate', () => {
     render(<App />);
 
     expect(screen.getByRole('button', { name: 'Connect admin account' })).toBeVisible();
+    expect(screen.getByText('To use this app, sign in with a Fabric administrator account.')).toBeVisible();
+    expect(screen.queryByText(/Read-only/)).not.toBeInTheDocument();
     expect(screen.getByText(/This app keeps its admin session only in memory/)).toBeVisible();
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
     expect(mockLoad).not.toHaveBeenCalled();
@@ -69,7 +72,8 @@ describe('Dedicated admin sign-in gate', () => {
     expect(mockSignIn).toHaveBeenCalledTimes(1);
     expect(mockLoad).toHaveBeenCalledTimes(1);
     expect(screen.getByText(syntheticAdmin.username)).toBeVisible();
-    expect(screen.getByText(/Fabric enforces tenant-admin permissions/)).toBeVisible();
+    expect(screen.getByText(/Fabric allows them only for Fabric administrators/)).toBeVisible();
+    expect(screen.queryByText(/Read-only/)).not.toBeInTheDocument();
   });
 
   it('disables repeated connection attempts while a popup is pending and waits before loading data', async () => {

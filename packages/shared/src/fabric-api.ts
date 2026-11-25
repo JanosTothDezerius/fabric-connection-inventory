@@ -98,7 +98,7 @@ async function readText(response: Response, maxBytes: number): Promise<string | 
   return text + decoder.decode();
 }
 
-async function readErrorBody(response: Response): Promise<Record<string, unknown>> {
+export async function readErrorBody(response: Response): Promise<Record<string, unknown>> {
   try {
     const text = await readText(response, MAX_ERROR_BODY_BYTES);
     const body: unknown = text ? JSON.parse(text) : undefined;
@@ -176,7 +176,7 @@ export function connection(value: unknown): ConnectionRecord {
   };
 }
 
-function owner(value: unknown): ConnectionOwner | null {
+export function owner(value: unknown): ConnectionOwner | null {
   const assignment = object(value);
   const role = text(assignment.role, true);
   if (role !== 'Owner' && role !== 'PendingOwner') return null;
@@ -289,6 +289,17 @@ export abstract class PacedApiClient {
   /** The message reported for an unsuccessful HTTP status. */
   protected abstract failureMessage(status: number): string;
 
+  /** The error reported for an unsuccessful response other than throttling. */
+  protected async failure(response: Response, requestId: string | undefined): Promise<InventoryError> {
+    await response.body?.cancel();
+    return new InventoryError({
+      code: `${this.errorPrefix}${response.status}`,
+      message: this.failureMessage(response.status),
+      status: response.status,
+      requestId,
+    });
+  }
+
   private assertNotThrottled(): void {
     if (this.throttledUntil > this.now()) {
       throw new InventoryError({
@@ -384,20 +395,13 @@ export abstract class PacedApiClient {
         this.abortSignal?.throwIfAborted();
         continue;
       }
-      if (!response.ok) {
-        await response.body?.cancel();
-        throw new InventoryError({
-          code: `${this.errorPrefix}${response.status}`,
-          message: this.failureMessage(response.status),
-          status: response.status,
-          requestId,
-        });
-      }
-      if (!response.body) invalidResponse();
-      const responseText = await readText(response, maxBytes);
+      if (!response.ok) throw await this.failure(response, requestId);
+      const responseText = response.body ? await readText(response, maxBytes) : '';
       if (responseText === null) {
         throw new InventoryError({ code: 'ResponseTooLarge', message: `The ${this.serviceName} API response exceeded the safe read limit. No partial page was accepted.` });
       }
+      // A success without content, such as 201 Created with no body, has no value; callers validate what they read.
+      if (!responseText.trim()) return undefined;
       try {
         return JSON.parse(responseText) as unknown;
       } catch {
@@ -413,7 +417,7 @@ export class FabricInventory extends PacedApiClient {
 
   protected override failureMessage(status: number): string {
     return status === 403 ?
-      'Access denied. Your signed-in account must be a Fabric administrator and have delegated Tenant.Read.All consent for this app.' :
+      'Access denied. Your signed-in account must be a Fabric administrator, and this app needs delegated Tenant.ReadWrite.All or Tenant.Read.All consent.' :
       status === 401 ? 'Fabric rejected the resource token. Check its audience, expiry, consent, and the admin API identity requirements.' :
       status === 404 ? 'This connection or admin API was not found. The connection may have been deleted, or the preview API may be unavailable.' :
       status === 503 ? 'Fabric remained unavailable after bounded retries.' :

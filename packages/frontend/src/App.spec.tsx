@@ -7,6 +7,7 @@ import { ThemeContext } from '@/hooks/theme.context';
 import { useAppTheme } from '@/hooks/use-theme';
 import { AdminAuthError, getAdminSession, getDirectoryAccessToken } from '@/services/admin-auth';
 import { emptyUsage, loadConnectionUsage, type LoadUsageOptions } from '@/services/connection-usage';
+import { TakeOverError, takeOverConnection, type TakeOverResult } from '@/services/connection-takeover';
 import { loadInventory } from '@/services/inventory';
 import { syntheticConnection, syntheticSnapshot } from '@/test/inventory-fixtures';
 import { configureSyntheticAdminEnvironment, syntheticTenantId } from '@/test/admin-config-fixtures';
@@ -15,6 +16,10 @@ vi.mock('@/services/inventory', () => ({ loadInventory: vi.fn() }));
 vi.mock('@/services/connection-usage', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/connection-usage')>(),
   loadConnectionUsage: vi.fn(),
+}));
+vi.mock('@/services/connection-takeover', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/services/connection-takeover')>(),
+  takeOverConnection: vi.fn(),
 }));
 vi.mock('@/services/admin-auth', () => ({
   getAdminSession: vi.fn(),
@@ -32,7 +37,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   configureSyntheticAdminEnvironment();
   vi.mocked(getAdminSession).mockReturnValue({
-    username: 'synthetic-admin@example.test', tenantId: syntheticTenantId,
+    username: 'synthetic-admin@example.test', tenantId: syntheticTenantId, permissions: ['Tenant.ReadWrite.All'],
   });
   mockUsage.mockReturnValue(new Promise(() => {}));
 });
@@ -70,7 +75,7 @@ describe('Connection inventory', () => {
     expect(table.getByText('synthetic-group-principal')).toBeVisible();
     expect(table.getByText('Pending owner')).toBeVisible();
     expect(screen.getByText('Partial owner results.')).toBeVisible();
-    expect(screen.getByText(/Requests use your signed-in account; Fabric enforces tenant-admin permissions/)).toBeVisible();
+    expect(screen.getByText('Requests use your signed-in account, and Fabric allows them only for Fabric administrators.')).toBeVisible();
     expect(screen.getByText('synthetic-admin@example.test')).toBeVisible();
     expect(screen.queryByText(/Backend requests run as the app owner/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Authorized admin:/)).not.toBeInTheDocument();
@@ -340,6 +345,171 @@ describe('Connection inventory', () => {
     ]);
     fireEvent.click(screen.getByRole('button', { name: 'Show details for Synthetic unused' }));
     expect(screen.getByText('Not used by any workload. No item in the 2 scanned workspaces is bound to this connection.')).toBeVisible();
+  });
+
+  it('offers Take over only in expanded details and shows that connection’s new owners at once', async () => {
+    // Not a GUID, so no Microsoft Graph name lookup starts for the new owner.
+    const admin = 'synthetic-admin-principal';
+    const group = { id: 'synthetic-group-principal', type: 'Group', role: 'Owner' as const };
+    vi.mocked(getAdminSession).mockReturnValue({
+      username: 'synthetic-admin@example.test', tenantId: syntheticTenantId, principalId: admin, permissions: ['Tenant.ReadWrite.All'],
+    });
+    mockLoad.mockResolvedValue(syntheticSnapshot([
+      syntheticConnection({ id: 'target', displayName: 'Synthetic target', owners: [group] }),
+      syntheticConnection({ id: 'other', displayName: 'Synthetic other' }),
+    ]));
+    let finish!: (result: TakeOverResult) => void;
+    vi.mocked(takeOverConnection).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    render(<App />);
+    await screen.findByText('Synthetic target');
+    expect(screen.queryByRole('button', { name: 'Take over' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show details for Synthetic target' }));
+    const takeOver = screen.getByRole('button', { name: 'Take over' });
+    expect(takeOver).toHaveAccessibleDescription('Adds your signed-in account as an owner. Existing owners are kept.');
+    fireEvent.click(takeOver);
+    expect(takeOverConnection).not.toHaveBeenCalled();
+    const confirmation = screen.getByRole('alertdialog', { name: 'Take over Synthetic target?' });
+    fireEvent.click(within(confirmation).getByRole('button', { name: 'Take over' }));
+    expect(confirmation).not.toBeInTheDocument();
+    fireEvent.click(takeOver);
+    expect(takeOverConnection).toHaveBeenCalledOnce();
+    expect(takeOverConnection).toHaveBeenCalledWith('target');
+    expect(takeOver).toBeDisabled();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+
+    const added = { id: admin, type: 'User', role: 'PendingOwner' as const };
+    await act(async () => finish({ principalId: admin, added, owners: [group, added] }));
+    const notifications = within(screen.getByRole('region', { name: 'Notifications' }));
+    expect(notifications.getByText('Connection taken over')).toBeVisible();
+    expect(notifications.getByText(/^You were added as a pending owner of Synthetic target\. Existing owners were kept\./)).toBeVisible();
+    const owners = within(screen.getByRole('list', { name: 'Connection owners' }));
+    expect(owners.getByText('synthetic-group-principal')).toBeVisible();
+    expect(owners.getByText(admin)).toBeVisible();
+    expect(owners.getByText('Pending owner')).toBeVisible();
+    expect(owners.getByText('You')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Take over' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Take over' })).toHaveAccessibleDescription(/^You’re a pending owner\./);
+    expect(mockLoad).toHaveBeenCalledOnce();
+
+    fireEvent.click(notifications.getByRole('button', { name: 'Dismiss: Connection taken over' }));
+    expect(notifications.queryByText('Connection taken over')).not.toBeInTheDocument();
+  });
+
+  it('notifies when a take over fails and leaves the owners unchanged', async () => {
+    mockLoad.mockResolvedValue(syntheticSnapshot([syntheticConnection({ id: 'target', displayName: 'Synthetic target' })]));
+    vi.mocked(takeOverConnection).mockRejectedValue(new TakeOverError({
+      code: 'FabricHttp403', message: 'Synthetic denial.', status: 403, requestId: 'synthetic-request-id',
+    }));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show details for Synthetic target' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Take over' }));
+    fireEvent.click(within(screen.getByRole('alertdialog', { name: 'Take over Synthetic target?' })).getByRole('button', { name: 'Take over' }));
+
+    const alert = await within(screen.getByRole('region', { name: 'Notifications' })).findByRole('alert');
+    expect(alert).toHaveTextContent('Take over failed');
+    expect(alert).toHaveTextContent('Synthetic target: Synthetic denial.');
+    expect(alert).toHaveTextContent('Error code: FabricHttp403');
+    expect(alert).toHaveTextContent('HTTP status: 403');
+    expect(alert).toHaveTextContent('Request ID: synthetic-request-id');
+    expect(within(screen.getByRole('table')).getByText('No owners returned')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Take over' })).toBeEnabled();
+  });
+
+  it('asks for confirmation, warning that the connection breaks until the listed steps are done, and changes nothing when cancelled', async () => {
+    mockLoad.mockResolvedValue(syntheticSnapshot([
+      syntheticConnection({ id: 'target', displayName: 'Synthetic target', credentialType: 'OAuth2' }),
+    ]));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show details for Synthetic target' }));
+    const takeOver = screen.getByRole('button', { name: 'Take over' });
+    fireEvent.click(takeOver);
+
+    const dialog = screen.getByRole('alertdialog', { name: 'Take over Synthetic target?' });
+    expect(dialog).toHaveAccessibleDescription(new RegExp('^Taking over breaks this connection\\. It stops working as soon as you take it over, ' +
+      'and won’t work again until you complete the steps below\\. Until then, the items that use it, such as those listed under ' +
+      'Dependent workloads, can’t connect\\. You’ll be added as a pending owner, and existing owners are kept\\.'));
+    expect(within(dialog).getByText('Taking over breaks this connection.')).toBeVisible();
+    expect(dialog).toHaveTextContent('To get the connection working again with your credentials and make your ownership effective:');
+    expect(dialog).toHaveTextContent('open Settings > Manage connections and gateways, and open this connection’s settings on the Connections tab.');
+    expect(dialog).toHaveTextContent('Enter credentials that can access the endpoint below, and save. This makes you an owner, and the connection works again.');
+    expect(dialog).toHaveTextContent('Make sure those credentials work for every item under Dependent workloads');
+    expect(within(dialog).getByText('synthetic.example.invalid;database=test')).toBeVisible();
+    expect(within(dialog).getByText('SyntheticSQL')).toBeVisible();
+    expect(within(dialog).getByText('OAuth2')).toBeVisible();
+    expect(within(dialog).getByText('Continue only if these steps are clear to you and you’ve confirmed that you have the access or credentials this endpoint needs.')).toBeVisible();
+
+    const cancel = within(dialog).getByRole('button', { name: 'Cancel' });
+    const confirm = within(dialog).getByRole('button', { name: 'Take over' });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(cancel, { key: 'Tab', shiftKey: true });
+    expect(confirm).toHaveFocus();
+    fireEvent.keyDown(confirm, { key: 'Tab' });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(cancel, { key: 'Escape' });
+    expect(dialog).not.toBeInTheDocument();
+    expect(takeOver).toHaveFocus();
+
+    fireEvent.click(takeOver);
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(takeOver).toHaveFocus();
+    expect(takeOverConnection).not.toHaveBeenCalled();
+  });
+
+  it('closes the confirmation when owner lookups show the signed-in account already has a role', () => {
+    const admin = 'synthetic-admin-principal';
+    vi.mocked(getAdminSession).mockReturnValue({
+      username: 'synthetic-admin@example.test', tenantId: syntheticTenantId, principalId: admin, permissions: ['Tenant.ReadWrite.All'],
+    });
+    let options!: LoadInventoryOptions;
+    mockLoad.mockImplementation((value) => {
+      options = value;
+      return new Promise(() => {});
+    });
+    render(<App />);
+    const target = syntheticConnection({ id: 'target', displayName: 'Synthetic target', ownerStatus: 'pending' });
+    act(() => options.onProgress(syntheticSnapshot([target], { phase: 'owners', updatedAt: null })));
+    fireEvent.click(screen.getByRole('button', { name: 'Show details for Synthetic target' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Take over' }));
+    expect(screen.getByRole('alertdialog', { name: 'Take over Synthetic target?' })).toBeVisible();
+
+    act(() => options.onProgress(syntheticSnapshot(
+      [{ ...target, ownerStatus: 'loaded', owners: [{ id: admin, type: 'User', role: 'Owner' }] }],
+      { phase: 'owners', updatedAt: null },
+    )));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Take over' })).toHaveAccessibleDescription('You already own this connection.');
+    expect(takeOverConnection).not.toHaveBeenCalled();
+
+    act(() => options.onProgress(syntheticSnapshot([{ ...target, ownerStatus: 'loaded' }], { phase: 'owners', updatedAt: null })));
+    expect(screen.getByRole('button', { name: 'Take over' })).toBeEnabled();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [['Tenant.ReadWrite.All'], 'Power BI Service permission: Tenant.ReadWrite.All, for the inventory and Take over.', true],
+    [['Tenant.Read.All'], 'Power BI Service permission: Tenant.Read.All, for the inventory only. Take over needs Tenant.ReadWrite.All in its place.', false],
+    [['Tenant.ReadWrite.All', 'Tenant.Read.All'],
+      'Power BI Service permissions: Tenant.ReadWrite.All and Tenant.Read.All. Tenant.ReadWrite.All already allows everything Tenant.Read.All does, so an administrator can revoke Tenant.Read.All.', true],
+  ] as const)('with the Fabric admin permissions %j, shows them and whether Take over is available', async (permissions, note, available) => {
+    vi.mocked(getAdminSession).mockReturnValue({
+      username: 'synthetic-admin@example.test', tenantId: syntheticTenantId, permissions,
+    });
+    mockLoad.mockResolvedValue(syntheticSnapshot([syntheticConnection({ id: 'target', displayName: 'Synthetic target' })]));
+    render(<App />);
+    expect(screen.getByRole('region', { name: 'Access and deployment context' })).toHaveTextContent(note);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show details for Synthetic target' }));
+    const takeOver = screen.getByRole('button', { name: 'Take over' });
+    if (available) {
+      expect(takeOver).toBeEnabled();
+    } else {
+      expect(takeOver).toBeDisabled();
+      expect(takeOver).toHaveAccessibleDescription('Take over needs the Power BI Service permission Tenant.ReadWrite.All, which this app doesn’t have.');
+      fireEvent.click(takeOver);
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+      expect(takeOverConnection).not.toHaveBeenCalled();
+    }
   });
 
   it('cancels a running workspace scan without marking a finished inventory as cancelled', async () => {

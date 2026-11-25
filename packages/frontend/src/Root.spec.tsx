@@ -46,7 +46,7 @@ describe('protected app content with standalone sign-in', () => {
     vi.mocked(loadInventory).mockClear();
     configureSyntheticAdminEnvironment();
     vi.mocked(getAdminSession).mockReset().mockReturnValue({
-      username: 'synthetic-admin@example.test', tenantId: syntheticTenantId,
+      username: 'synthetic-admin@example.test', tenantId: syntheticTenantId, permissions: ['Tenant.ReadWrite.All'],
     });
     vi.mocked(signInAdmin).mockClear();
     vi.stubGlobal(

@@ -23,6 +23,7 @@
   --cp-link: #0078d4;
   --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12);
   --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-scrim: rgba(0, 0, 0, 0.4);
   --cp-panel: rgba(255, 255, 255, 0.86);
   --cp-panel-strong: rgba(255, 255, 255, 0.96);
   --cp-sheen: rgba(255, 255, 255, 0.55);
@@ -49,6 +50,7 @@ html[data-theme="dark"] {
   --cp-link: #4da6ff;
   --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
   --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-scrim: rgba(0, 0, 0, 0.6);
   --cp-panel: rgba(41, 41, 41, 0.72);
   --cp-panel-strong: rgba(41, 41, 41, 0.96);
   --cp-sheen: rgba(255, 255, 255, 0.04);
@@ -289,6 +291,10 @@ body,
     color: var(--cp-text-soft);
     background: var(--cp-surface-soft);
     cursor: not-allowed;
+  }
+
+  .inventory-button-primary:disabled {
+    border-color: var(--cp-border);
   }
 
   .inventory-icon-button {
@@ -641,6 +647,122 @@ body,
 
   .inventory-skip-link:focus { transform: translateY(0); }
 
+  .inventory-take-over {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--spacing-300);
+  }
+
+  .inventory-take-over > p {
+    max-width: 360px;
+  }
+
+  /* Fixed to the bottom right of the visible screen, including when the app is embedded in Fabric. */
+  .inventory-toasts {
+    position: fixed;
+    z-index: 50;
+    right: var(--spacing-400);
+    bottom: var(--spacing-400);
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-300);
+    width: min(400px, calc(100vw - 2 * var(--spacing-400)));
+    pointer-events: none;
+  }
+
+  .inventory-toast {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--spacing-300);
+    padding: var(--spacing-400);
+    border: 1px solid var(--cp-border);
+    border-left: 4px solid var(--cp-success);
+    border-radius: var(--radius-xl);
+    background: var(--cp-surface);
+    color: var(--cp-text);
+    box-shadow: var(--cp-shadow);
+    pointer-events: auto;
+    animation: inventory-toast-in 160ms ease-out;
+  }
+
+  .inventory-toast > svg {
+    color: var(--cp-success);
+  }
+
+  .inventory-toast[data-tone="error"] {
+    border-left-color: var(--cp-danger);
+  }
+
+  .inventory-toast[data-tone="error"] > svg {
+    color: var(--cp-danger);
+  }
+
+  .inventory-toast-close {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    margin: calc(-1 * var(--spacing-100)) calc(-1 * var(--spacing-100)) 0 0;
+    border-radius: var(--radius-md);
+    color: var(--cp-text-soft);
+    cursor: pointer;
+  }
+
+  .inventory-toast-close:hover {
+    background: var(--cp-surface-soft);
+    color: var(--cp-text);
+  }
+
+  /* Modal, and above the notifications. */
+  .inventory-dialog-backdrop {
+    position: fixed;
+    z-index: 60;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--spacing-400);
+    background: var(--cp-scrim);
+  }
+
+  .inventory-dialog {
+    display: grid;
+    gap: var(--spacing-500);
+    width: min(560px, 100%);
+    max-height: 100%;
+    overflow-y: auto;
+    padding: var(--spacing-600);
+    border: 1px solid var(--cp-border);
+    border-radius: var(--radius-xl);
+    background: var(--cp-surface);
+    color: var(--cp-text);
+    box-shadow: var(--cp-shadow);
+  }
+
+  .inventory-dialog:focus {
+    outline: none;
+  }
+
+  .inventory-dialog-facts {
+    display: grid;
+    gap: var(--spacing-300);
+    padding: var(--spacing-400);
+    border: 1px solid var(--cp-border);
+    border-radius: var(--radius-xl);
+    background: var(--cp-bg-elevated);
+  }
+
+  .inventory-dialog-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--spacing-300);
+  }
+
   @media (max-width: 1000px) {
     .inventory-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .inventory-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -654,9 +776,22 @@ body,
     .inventory-metric-number { font-size: var(--text-hero-700); }
     .inventory-notice { flex-wrap: wrap; }
     .inventory-notice > .inventory-button { margin-left: var(--spacing-800); }
+    .inventory-dialog { padding: var(--spacing-500); }
   }
 
   @media (prefers-reduced-motion: reduce) {
     .inventory-button, .inventory-icon-button { transition: none; }
+    .inventory-toast { animation: none; }
+  }
+}
+
+@keyframes inventory-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
   }
 }

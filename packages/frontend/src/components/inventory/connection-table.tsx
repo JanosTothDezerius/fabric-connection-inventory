@@ -1,14 +1,27 @@
-import { Fragment, useId, useState } from 'react';
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight } from 'lucide-react';
-import type { ConnectionRow, DependentItem } from '@rayfin-app/shared';
+import { Fragment, useId, useRef, useState } from 'react';
+import {
+  ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight, LoaderCircle, UserPlus,
+} from 'lucide-react';
+import type { ConnectionOwner, ConnectionRow, DependentItem } from '@rayfin-app/shared';
 
 import type { UsageSnapshot } from '@/services/connection-usage';
 import { credentialTypeLabel, formatTimestamp, type InventorySort, type SortColumn } from './inventory-model';
+import { TakeOverConfirmation } from './take-over-confirmation';
 
 export interface UsageView {
   snapshot: UsageSnapshot;
   loading: boolean;
   cancelled: boolean;
+}
+
+export interface TakeOverView {
+  /** Lower-case object ID of the signed-in account, when known. */
+  accountId?: string;
+  /** The app has Tenant.ReadWrite.All, which Take over needs. */
+  available: boolean;
+  /** IDs of the connections with a take over in progress. */
+  pending: ReadonlySet<string>;
+  onTakeOver: (row: ConnectionRow) => void;
 }
 
 interface ConnectionTableProps {
@@ -17,11 +30,16 @@ interface ConnectionTableProps {
   onSort: (column: SortColumn) => void;
   loading: boolean;
   usage: UsageView;
+  takeOver: TakeOverView;
   emptyTitle: string;
   emptyDescription: string;
 }
 
-function Owners({ row }: { row: ConnectionRow }) {
+function isAccount(owner: ConnectionOwner, accountId: string | undefined): boolean {
+  return accountId !== undefined && owner.id.toLowerCase() === accountId;
+}
+
+function Owners({ row, accountId }: { row: ConnectionRow; accountId?: string }) {
   return (
     <div className="space-y-300">
       {row.ownerStatus === 'pending' && (
@@ -47,6 +65,7 @@ function Owners({ row }: { row: ConnectionRow }) {
                 {owner.role === 'PendingOwner' && (
                   <span className="inventory-badge inventory-badge-accent">Pending owner</span>
                 )}
+                {isAccount(owner, accountId) && <span className="inventory-badge">You</span>}
               </div>
               <div className="text-200 text-muted-foreground">
                 {owner.type || 'Principal type not provided'}
@@ -130,7 +149,57 @@ function DependentWorkloads({ row, usage }: { row: ConnectionRow; usage: UsageVi
   );
 }
 
-function ConnectionDetails({ row, usage }: { row: ConnectionRow; usage: UsageView }) {
+/** Adds the signed-in account as an owner once confirmed; shown only in a connection's expanded details. */
+function TakeOverAction({ row, takeOver }: { row: ConnectionRow; takeOver: TakeOverView }) {
+  const noteId = useId();
+  const button = useRef<HTMLButtonElement>(null);
+  const [confirming, setConfirming] = useState(false);
+  const busy = takeOver.pending.has(row.id);
+  const own = row.owners.find((owner) => isAccount(owner, takeOver.accountId));
+  const disabled = busy || own !== undefined || !takeOver.available;
+  // Closes the confirmation if Take over stops being possible meanwhile, such as when owner lookups show the account's role.
+  if (confirming && disabled) setConfirming(false);
+  const note = busy ? 'Adding your account as an owner…' :
+    own?.role === 'Owner' ? 'You already own this connection.' :
+      own ? 'You’re a pending owner. Update the connection’s credentials to make your ownership effective.' :
+        !takeOver.available ? 'Take over needs the Power BI Service permission Tenant.ReadWrite.All, which this app doesn’t have.' :
+          'Adds your signed-in account as an owner. Existing owners are kept.';
+
+  function close() {
+    setConfirming(false);
+    button.current?.focus();
+  }
+
+  return (
+    <div className="inventory-take-over">
+      <p id={noteId} className="text-200 text-muted-foreground">{note}</p>
+      <button
+        ref={button}
+        className="inventory-button inventory-button-primary"
+        onClick={() => setConfirming(true)}
+        disabled={disabled}
+        aria-describedby={noteId}
+        aria-haspopup="dialog"
+      >
+        {busy ? <LoaderCircle className="icon-size-200 motion-safe:animate-spin" aria-hidden="true" /> :
+          <UserPlus className="icon-size-200" aria-hidden="true" />}
+        Take over
+      </button>
+      {confirming && !disabled && (
+        <TakeOverConfirmation
+          row={row}
+          onCancel={close}
+          onConfirm={() => {
+            close();
+            takeOver.onTakeOver(row);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ConnectionDetails({ row, usage, takeOver }: { row: ConnectionRow; usage: UsageView; takeOver: TakeOverView }) {
   const details = [
     ['Connectivity', row.connectivityType],
     ['Gateway ID', row.gatewayId],
@@ -142,7 +211,10 @@ function ConnectionDetails({ row, usage }: { row: ConnectionRow; usage: UsageVie
 
   return (
     <div className="space-y-400 p-500">
-      <h3 className="font-semibold">Connection details</h3>
+      <div className="flex flex-wrap items-start justify-between gap-300">
+        <h3 className="font-semibold">Connection details</h3>
+        <TakeOverAction row={row} takeOver={takeOver} />
+      </div>
       <dl className="grid gap-400 sm:grid-cols-2 xl:grid-cols-3">
         {details.map(([label, value]) => (
           <div key={label} className="min-w-0">
@@ -174,7 +246,7 @@ function ConnectionDetails({ row, usage }: { row: ConnectionRow; usage: UsageVie
 }
 
 export function ConnectionTable({
-  rows, sort, onSort, loading, usage, emptyTitle, emptyDescription,
+  rows, sort, onSort, loading, usage, takeOver, emptyTitle, emptyDescription,
 }: ConnectionTableProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const tableId = useId();
@@ -242,7 +314,7 @@ export function ConnectionTable({
                     <p className="font-semibold">{row.displayName || '(unnamed connection)'}</p>
                     <p className="mt-100 font-monospace text-200 font-regular text-muted-foreground">{row.id}</p>
                   </th>
-                  <td><Owners row={row} /></td>
+                  <td><Owners row={row} accountId={takeOver.accountId} /></td>
                   <td>
                     <span className="inventory-badge">{row.connectorType || 'Not returned'}</span>
                     <p className="mt-200 text-200 text-muted-foreground">Auth: {credentialTypeLabel(row.credentialType)}</p>
@@ -251,7 +323,7 @@ export function ConnectionTable({
                 </tr>
                 {isExpanded && (
                   <tr id={detailId} className="inventory-detail-row">
-                    <td colSpan={5}><ConnectionDetails row={row} usage={usage} /></td>
+                    <td colSpan={5}><ConnectionDetails row={row} usage={usage} takeOver={takeOver} /></td>
                   </tr>
                 )}
               </Fragment>
