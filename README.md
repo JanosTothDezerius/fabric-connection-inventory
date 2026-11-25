@@ -29,13 +29,14 @@ connection inventory, or previous deployment records are included.
   it, or state that no scanned item uses it.
 - Take over: a connection's details have a **Take over** button that adds your
   signed-in account as an owner of that connection and keeps every existing
-  owner. Before anything changes, a confirmation shows the connection's endpoint
-  and what you must do afterwards: update the connection's credentials in
-  Fabric with ones that can access that endpoint, which also become the
-  credentials its dependent workloads run with. A notification at the bottom
-  right reports whether the take over succeeded, and that connection's owners
-  are looked up again and shown immediately, without reloading the inventory.
-  Your own owner entries are marked **You**.
+  owner. Before anything changes, a confirmation warns that taking over breaks
+  the connection until you complete the follow-up steps, shows the connection's
+  endpoint, and lists those steps: update the connection's credentials in Fabric
+  with ones that can access that endpoint, which also become the credentials
+  its dependent workloads run with. A notification at the bottom right reports
+  whether the take over succeeded, and that connection's owners are looked up
+  again and shown immediately, without reloading the inventory. Your own owner
+  entries are marked **You**.
 - Clear distinction between empty owner results, failed lookups, and unread rows.
 - Refresh, cancellation, responsive layout, and light/dark themes.
 - Paced requests that pause automatically while Fabric throttles, and owner
@@ -394,9 +395,11 @@ snapshot; connections may change during enumeration.
 - **Take over** uses Fabric's admin connection management API, which is in
   preview. Fabric records an administrator added this way as a pending owner
   (`PendingOwner`) until they update the connection's credentials, which makes
-  them an owner. The button is unavailable while you own the connection or are
-  its pending owner. After a take over, only that connection's owners are looked
-  up again; **Refresh inventory** shows the latest owners of every connection.
+  them an owner. Taking over breaks the connection: it stops working at once
+  and doesn't work again until those credentials are updated. The button is
+  unavailable while you own the connection or are its pending owner. After a
+  take over, only that connection's owners are looked up again;
+  **Refresh inventory** shows the latest owners of every connection.
 - Missing display names and metadata are marked explicitly.
 - Partial results remain visibly incomplete. Unread or failed owner lookups never
   appear as successful empty results.

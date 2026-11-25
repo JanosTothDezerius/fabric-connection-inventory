@@ -416,7 +416,7 @@ describe('Connection inventory', () => {
     expect(screen.getByRole('button', { name: 'Take over' })).toBeEnabled();
   });
 
-  it('asks for confirmation, listing the steps after a take over and the endpoint, and changes nothing when cancelled', async () => {
+  it('asks for confirmation, warning that the connection breaks until the listed steps are done, and changes nothing when cancelled', async () => {
     mockLoad.mockResolvedValue(syntheticSnapshot([
       syntheticConnection({ id: 'target', displayName: 'Synthetic target', credentialType: 'OAuth2' }),
     ]));
@@ -426,9 +426,13 @@ describe('Connection inventory', () => {
     fireEvent.click(takeOver);
 
     const dialog = screen.getByRole('alertdialog', { name: 'Take over Synthetic target?' });
-    expect(dialog).toHaveAccessibleDescription(/^You’ll be added as a pending owner, and existing owners are kept\./);
+    expect(dialog).toHaveAccessibleDescription(new RegExp('^Taking over breaks this connection\\. It stops working as soon as you take it over, ' +
+      'and won’t work again until you complete the steps below\\. Until then, the items that use it, such as those listed under ' +
+      'Dependent workloads, can’t connect\\. You’ll be added as a pending owner, and existing owners are kept\\.'));
+    expect(within(dialog).getByText('Taking over breaks this connection.')).toBeVisible();
+    expect(dialog).toHaveTextContent('To get the connection working again with your credentials and make your ownership effective:');
     expect(dialog).toHaveTextContent('open Settings > Manage connections and gateways, and open this connection’s settings on the Connections tab.');
-    expect(dialog).toHaveTextContent('Enter credentials that can access the endpoint below, and save. For OAuth2, select Edit credentials and sign in. This makes you an owner.');
+    expect(dialog).toHaveTextContent('Enter credentials that can access the endpoint below, and save. For OAuth2, select Edit credentials and sign in. This makes you an owner, and the connection works again.');
     expect(dialog).toHaveTextContent('Make sure those credentials work for every item under Dependent workloads');
     expect(within(dialog).getByText('synthetic.example.invalid;database=test')).toBeVisible();
     expect(within(dialog).getByText('SyntheticSQL')).toBeVisible();

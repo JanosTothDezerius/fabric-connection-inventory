@@ -1,12 +1,13 @@
 import { useEffect, useId, useRef, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
+import { TriangleAlert } from 'lucide-react';
 import type { ConnectionRow } from '@rayfin-app/shared';
 
 import { credentialTypeLabel } from './inventory-model';
 
 /**
- * Asks for confirmation before a take over, listing what the user must do afterwards for the connection
- * to work under their ownership.
+ * Asks for confirmation before a take over, warning that it breaks the connection until the user completes the
+ * listed steps that make it work under their ownership.
  */
 export function TakeOverConfirmation({ row, onConfirm, onCancel }: {
   row: ConnectionRow;
@@ -59,9 +60,17 @@ export function TakeOverConfirmation({ row, onConfirm, onCancel }: {
       >
         <h2 id={`${id}-title`} className="text-400 font-semibold">{`Take over ${row.displayName || row.id}?`}</h2>
         <div id={`${id}-description`} className="space-y-300">
+          <div className="inventory-notice inventory-warning">
+            <TriangleAlert className="icon-size-300 shrink-0" aria-hidden="true" />
+            <p>
+              <strong>Taking over breaks this connection.</strong> It stops working as soon as you take it over, and
+              won’t work again until you complete the steps below. Until then, the items that use it, such as those
+              listed under <strong>Dependent workloads</strong>, can’t connect.
+            </p>
+          </div>
           <p>
-            You’ll be added as a pending owner, and existing owners are kept. To make your ownership effective and get
-            the connection working with your credentials:
+            You’ll be added as a pending owner, and existing owners are kept. To get the connection working again with
+            your credentials and make your ownership effective:
           </p>
           <ol className="list-decimal space-y-200 pl-500">
             <li>
@@ -70,7 +79,7 @@ export function TakeOverConfirmation({ row, onConfirm, onCancel }: {
             </li>
             <li>
               Enter credentials that can access the endpoint below, and save. For OAuth2, select <strong>Edit
-              credentials</strong> and sign in. This makes you an owner.
+              credentials</strong> and sign in. This makes you an owner, and the connection works again.
             </li>
             <li>
               Make sure those credentials work for every item under <strong>Dependent workloads</strong>, because
