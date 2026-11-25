@@ -432,7 +432,7 @@ describe('Connection inventory', () => {
     expect(within(dialog).getByText('Taking over breaks this connection.')).toBeVisible();
     expect(dialog).toHaveTextContent('To get the connection working again with your credentials and make your ownership effective:');
     expect(dialog).toHaveTextContent('open Settings > Manage connections and gateways, and open this connection’s settings on the Connections tab.');
-    expect(dialog).toHaveTextContent('Enter credentials that can access the endpoint below, and save. For OAuth2, select Edit credentials and sign in. This makes you an owner, and the connection works again.');
+    expect(dialog).toHaveTextContent('Enter credentials that can access the endpoint below, and save. This makes you an owner, and the connection works again.');
     expect(dialog).toHaveTextContent('Make sure those credentials work for every item under Dependent workloads');
     expect(within(dialog).getByText('synthetic.example.invalid;database=test')).toBeVisible();
     expect(within(dialog).getByText('SyntheticSQL')).toBeVisible();

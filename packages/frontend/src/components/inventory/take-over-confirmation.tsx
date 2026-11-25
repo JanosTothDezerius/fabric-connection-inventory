@@ -78,8 +78,8 @@ export function TakeOverConfirmation({ row, onConfirm, onCancel }: {
               this connection’s settings on the <strong>Connections</strong> tab.
             </li>
             <li>
-              Enter credentials that can access the endpoint below, and save. For OAuth2, select <strong>Edit
-              credentials</strong> and sign in. This makes you an owner, and the connection works again.
+              Enter credentials that can access the endpoint below, and save. This makes you an owner, and the
+              connection works again.
             </li>
             <li>
               Make sure those credentials work for every item under <strong>Dependent workloads</strong>, because
